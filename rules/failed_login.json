@@ -1,0 +1,14 @@
+// Starter detection: failed authentication
+{
+  "id": "AUTO-AUTH-001",
+  "name": "Failed authentication",
+  "description": "Low-fidelity failed login finding. Future versions should aggregate thresholds by user/source/time window.",
+  "severity": "low",
+  "risk_points": 10,
+  "selection": {
+    "category": "authentication",
+    "outcome": {"contains_any": ["fail", "denied", "error"]}
+  },
+  "mitre_attack": ["T1110"],
+  "tags": ["identity", "authentication"]
+}

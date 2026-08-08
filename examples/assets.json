@@ -1,0 +1,7 @@
+[
+  {"hostname": "web-01", "ip": "203.0.113.20", "criticality": "critical", "owner": "platform-team", "environment": "prod", "os": "Ubuntu 22.04", "tags": ["internet-facing", "pci"]},
+  {"hostname": "finance-02", "criticality": "high", "owner": "finance", "environment": "prod", "os": "Windows Server 2022", "tags": ["finance"]},
+  {"hostname": "vpn-1", "criticality": "high", "environment": "prod", "os": "Linux"},
+  {"hostname": "mail-gw", "criticality": "medium", "environment": "prod"},
+  {"hostname": "workstation-7", "ip": "198.51.100.25", "criticality": "low", "owner": "alice", "environment": "corp", "os": "Windows 11", "tags": ["laptop"]}
+]

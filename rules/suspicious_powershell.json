@@ -1,0 +1,16 @@
+// Starter detection: encoded PowerShell execution
+// Uses JSON after stripping these leading comments.
+{
+  "id": "AUTO-EXEC-001",
+  "name": "Encoded PowerShell command",
+  "description": "Detects PowerShell execution with encoded command flags often used for obfuscation.",
+  "severity": "high",
+  "risk_points": 85,
+  "selection": {
+    "category": "process",
+    "process_name": {"contains": "powershell"},
+    "command_line": {"contains_any": ["-enc", "-encodedcommand"]}
+  },
+  "mitre_attack": ["T1059.001", "T1027"],
+  "tags": ["endpoint", "execution", "powershell"]
+}

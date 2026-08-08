@@ -1,0 +1,12 @@
+{
+  "include": ["src", "tests", "rules", "examples", "scripts"],
+  "typeCheckingMode": "basic",
+  "reportAny": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportMissingTypeStubs": "none",
+  "reportImplicitStringConcatenation": "none",
+  "reportPrivateUsage": "none"
+}

@@ -1,0 +1,15 @@
+// Lateral movement tools — covers MITRE ATT&CK T1021 (Remote Services)
+{
+  "id": "AUTO-LAT-001",
+  "name": "Lateral movement tool in use",
+  "description": "Detects remote-services tooling (psexec, wmic /node:, winrs, mstsc) used to move to another host. After stealing credentials, attackers move laterally (T1021) to reach high-value systems; correlate the target host with asset criticality.",
+  "severity": "high",
+  "risk_points": 65,
+  "selection": {
+    "category": "process",
+    "process_name": {"contains_any": ["psexec", "wmic.exe", "winrs.exe", "mstsc.exe", "ssh.exe"]},
+    "command_line": {"contains_any": ["/node:", "-s cmd", "-d ", "3389", "5985"]}
+  },
+  "mitre_attack": ["T1021"],
+  "tags": ["lateral-movement", "remote-services", "endpoint"]
+}

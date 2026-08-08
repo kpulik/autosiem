@@ -1,0 +1,15 @@
+// Ransomware / file encryption — covers MITRE ATT&CK T1486 (Data Encrypted for Impact)
+{
+  "id": "AUTO-IMPACT-001",
+  "name": "Ransomware encryption activity",
+  "description": "Detects known ransomware families (LockBit, Conti, Ryuk, BlackCat, ...) launched with an encrypt flag. Encrypting files for extortion (T1486) is the final impact stage; treat as confirmed compromise and preserve evidence.",
+  "severity": "critical",
+  "risk_points": 100,
+  "selection": {
+    "category": "process",
+    "process_name": {"contains_any": ["lockbit", "conti", "ryuk", "blackcat", "alphv", "wannacry", "petya", "hive"]},
+    "command_line": {"contains": "-encrypt"}
+  },
+  "mitre_attack": ["T1486"],
+  "tags": ["impact", "ransomware", "endpoint"]
+}

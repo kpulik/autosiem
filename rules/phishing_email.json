@@ -1,0 +1,14 @@
+// Phishing email detection — covers MITRE ATT&CK T1566 (Initial Access: Phishing)
+{
+  "id": "AUTO-EMAIL-001",
+  "name": "Phishing email delivered",
+  "description": "A message identified as phishing or malicious was delivered to a mailbox. Attackers use spear-phishing (T1566.001) and link-based phishing (T1566.002) as the #1 initial-access vector. Investigate the recipient, any attachments, and subsequent process or authentication activity on the endpoint.",
+  "severity": "high",
+  "risk_points": 75,
+  "selection": {
+    "category": "email",
+    "action": {"contains_any": ["phish", "malicious_email", "suspicious_attachment"]}
+  },
+  "mitre_attack": ["T1566", "T1566.001"],
+  "tags": ["email", "initial-access", "phishing", "spear-phishing"]
+}

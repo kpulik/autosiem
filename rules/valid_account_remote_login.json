@@ -1,0 +1,18 @@
+// Low-fidelity baseline: successful remote authentication — MITRE ATT&CK T1078 (Valid Accounts)
+// This fires on every successful remote login. Low severity by design: it becomes meaningful
+// when correlated with phishing, cloud role assumptions, or anomaly findings for the same entity.
+{
+  "id": "AUTO-CRED-001",
+  "name": "Successful remote authentication",
+  "description": "A remote authentication succeeded (src_ip is present). Adversaries who have stolen or purchased valid credentials (T1078) use them to authenticate from external systems, bypassing many perimeter controls. Low severity individually; investigate when co-occurring with phishing, privilege escalation, or unusual process activity.",
+  "severity": "low",
+  "risk_points": 25,
+  "selection": {
+    "category": "authentication",
+    "action": {"contains": "login"},
+    "outcome": "success",
+    "src_ip": {"regex": "^.+$"}
+  },
+  "mitre_attack": ["T1078", "T1078.001"],
+  "tags": ["identity", "authentication", "initial-access", "valid-accounts"]
+}

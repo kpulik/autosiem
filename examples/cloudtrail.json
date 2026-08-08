@@ -1,0 +1,61 @@
+{
+  "Records": [
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::123456789012:user/alice",
+        "accountId": "123456789012",
+        "userName": "alice"
+      },
+      "eventTime": "2026-08-04T10:08:00Z",
+      "eventSource": "iam.amazonaws.com",
+      "eventName": "AssumeRole",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.25",
+      "userAgent": "console.aws.amazon.com",
+      "requestParameters": {
+        "roleArn": "arn:aws:iam::123456789012:role/AdminRole",
+        "roleSessionName": "alice-session"
+      },
+      "responseElements": {
+        "credentials": { "sessionToken": "FwoGZXIvYXdzEAEaD..." }
+      },
+      "requestID": "REQ-CLOUD-001",
+      "eventID": "EVT-CLOUD-001",
+      "readOnly": false,
+      "eventType": "AwsApiCall",
+      "managementEvent": true,
+      "recipientAccountId": "123456789012",
+      "errorCode": null,
+      "errorMessage": null
+    },
+    {
+      "eventVersion": "1.08",
+      "userIdentity": {
+        "type": "IAMUser",
+        "arn": "arn:aws:iam::123456789012:user/alice",
+        "accountId": "123456789012",
+        "userName": "alice"
+      },
+      "eventTime": "2026-08-04T10:09:00Z",
+      "eventSource": "signin.amazonaws.com",
+      "eventName": "ConsoleLogin",
+      "awsRegion": "us-east-1",
+      "sourceIPAddress": "198.51.100.77",
+      "userAgent": "Mozilla/5.0",
+      "requestParameters": { "mfaRequired": false },
+      "responseElements": {
+        "ConsoleLogin": "Failure"
+      },
+      "requestID": "R-CONSOLE-001",
+      "eventID": "EVT-CONSOLE-001",
+      "readOnly": true,
+      "eventType": "AwsConsoleSignIn",
+      "managementEvent": true,
+      "recipientAccountId": "123456789012",
+      "errorCode": "FailedAuthentication",
+      "errorMessage": "Incorrect username or password"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+// Exfiltration over C2 channel — covers MITRE ATT&CK T1041 (Exfiltration Over C2 Channel)
+{
+  "id": "AUTO-EXFIL-001",
+  "name": "Large outbound data transfer",
+  "description": "Detects large outbound network transfers (>=5 MB in a single event) tagged as data transfer or upload. Attackers exfiltrate stolen data over their command-and-control channel (T1041); investigate the destination IP and correlate with credential/theft activity.",
+  "severity": "high",
+  "risk_points": 80,
+  "selection": {
+    "category": "network",
+    "action": {"contains_any": ["exfil", "data_transfer", "upload"]},
+    "raw.direction": "outbound",
+    "raw.bytes_sent": {"regex": "^[5-9][0-9]{6,}$"}
+  },
+  "mitre_attack": ["T1041"],
+  "tags": ["exfiltration", "c2", "network"]
+}

@@ -1,0 +1,14 @@
+// Log clearing — covers MITRE ATT&CK T1070 (Indicator Removal)
+{
+  "id": "AUTO-DEFEV-002",
+  "name": "Security log clearing or removal",
+  "description": "Detects commands that clear or delete security logs (wevtutil cl, Clear-EventLog, Remove-EventLog, del *.evtx, journalctl --vacuum). Adversaries erase traces of their activity (T1070) after achieving their objective.",
+  "severity": "high",
+  "risk_points": 70,
+  "selection": {
+    "category": "process",
+    "command_line": {"contains_any": ["wevtutil cl", "wevtutil clear-log", "clear-eventlog", "remove-eventlog", "del *.evtx", "rm -rf /var/log", "journalctl --vacuum"]}
+  },
+  "mitre_attack": ["T1070"],
+  "tags": ["defense-evasion", "log-clearing", "endpoint"]
+}

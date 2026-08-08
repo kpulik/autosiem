@@ -1,0 +1,15 @@
+// Masquerading — covers MITRE ATT&CK T1036 (Masquerading)
+{
+  "id": "AUTO-DEFEV-001",
+  "name": "System process running from user-writable path",
+  "description": "Detects a well-known system binary name (svchost, lsass, explorer, ...) launched from a user-writable path such as TEMP or Downloads. Attackers masquerade malware as trusted system processes (T1036) to evade analyst review.",
+  "severity": "medium",
+  "risk_points": 55,
+  "selection": {
+    "category": "process",
+    "process_name": {"endswith_any": ["svchost.exe", "lsass.exe", "explorer.exe", "winlogon.exe", "services.exe"]},
+    "command_line": {"contains_any": ["\\temp\\", "\\tmp\\", "\\appdata\\", "\\downloads\\", "/tmp/", "/temp/"]}
+  },
+  "mitre_attack": ["T1036"],
+  "tags": ["defense-evasion", "masquerading", "endpoint"]
+}

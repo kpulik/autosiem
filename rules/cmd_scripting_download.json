@@ -1,0 +1,15 @@
+// Command & scripting interpreter abuse — covers MITRE ATT&CK T1059 (Command and Scripting Interpreter)
+{
+  "id": "AUTO-EXEC-002",
+  "name": "Suspicious scripting interpreter with download or execute pattern",
+  "description": "Detects cmd.exe/cscript/wscript/mshta used with download-and-execute tokens (certutil, bitsadmin, mshta, rundll32, iex). Attackers use built-in scripting interpreters (T1059) to stage and run next-stage tooling with little footprint.",
+  "severity": "high",
+  "risk_points": 70,
+  "selection": {
+    "category": "process",
+    "process_name": {"endswith_any": ["cmd.exe", "cscript.exe", "wscript.exe", "mshta.exe"]},
+    "command_line": {"contains_any": ["certutil", "bitsadmin", "powershell -e", "-encodedcommand", "mshta", "rundll32", "iex ", "wget", "curl"]}
+  },
+  "mitre_attack": ["T1059"],
+  "tags": ["execution", "scripting", "endpoint"]
+}

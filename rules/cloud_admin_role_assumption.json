@@ -1,0 +1,15 @@
+// Starter detection: cloud administrative role assumption
+{
+  "id": "AUTO-CLOUD-001",
+  "name": "Administrative cloud role assumed",
+  "description": "Detects cloud role assumption into an administrative role. Tune with approved automation/user allowlists.",
+  "severity": "medium",
+  "risk_points": 55,
+  "selection": {
+    "category": "cloud",
+    "action": {"contains_any": ["AssumeRole", "assume_role"]},
+    "resource": {"contains_any": ["Admin", "Administrator", "Owner"]}
+  },
+  "mitre_attack": ["T1078", "T1078.004", "T1098"],
+  "tags": ["cloud", "identity", "privilege"]
+}

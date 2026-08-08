@@ -1,0 +1,5 @@
+[
+  {"username": "alice", "display_name": "Alice Ng", "email": "alice@example.com", "department": "Finance", "title": "Controller", "manager": "dana", "privileged": false, "status": "active"},
+  {"username": "svc-backup", "display_name": "Backup Service Account", "department": "IT", "privileged": true, "status": "active", "tags": ["service-account"]},
+  {"username": "former-employee", "display_name": "Sam Ortiz", "department": "Sales", "status": "disabled"}
+]

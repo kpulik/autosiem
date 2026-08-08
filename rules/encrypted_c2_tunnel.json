@@ -1,0 +1,15 @@
+// Encrypted C2 channel — covers MITRE ATT&CK T1573 (Encrypted Channel)
+{
+  "id": "AUTO-C2-001",
+  "name": "Encrypted tunnel to external host",
+  "description": "Detects tunneling/reverse-forward tooling (ssh -R/-L/-D, socat, stunnel, iodine, dnscat2, proxychains) used to establish an encrypted channel to an external host. Attackers encrypt C2 traffic to evade inspection (T1573); verify the destination IP and the operator account.",
+  "severity": "high",
+  "risk_points": 75,
+  "selection": {
+    "category": "process",
+    "process_name": {"contains_any": ["ssh.exe", "stunnel", "socat", "iodine", "dnscat2", "proxychains", "obfs4"]},
+    "command_line": {"contains_any": ["-R ", "-L ", "-D ", "tls", "8443"]}
+  },
+  "mitre_attack": ["T1573"],
+  "tags": ["command-and-control", "encrypted-channel", "endpoint"]
+}

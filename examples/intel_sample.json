@@ -1,0 +1,20 @@
+{
+  "type": "bundle",
+  "id": "bundle--intel-sample",
+  "objects": [
+    {
+      "type": "indicator",
+      "id": "indicator--c2-beacon",
+      "name": "Known C2 beacon IP",
+      "pattern": "[ipv4-addr:value = '203.0.113.66']",
+      "description": "Sample indicator: replace with real intel from your TAXII feed."
+    },
+    {
+      "type": "indicator",
+      "id": "indicator--malware-domain",
+      "name": "Malware command domain",
+      "pattern": "[domain-name:value = 'evil.example.com']",
+      "description": "Sample indicator: replace with real intel from your TAXII feed."
+    }
+  ]
+}

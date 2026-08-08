@@ -1,0 +1,14 @@
+// System information discovery — covers MITRE ATT&CK T1082 (System Information Discovery)
+{
+  "id": "AUTO-DISCO-001",
+  "name": "System information discovery",
+  "description": "Detects host discovery commands (systeminfo, ipconfig /all, quser, net config) that adversaries run after a foothold to learn the environment before lateral movement or impact.",
+  "severity": "low",
+  "risk_points": 20,
+  "selection": {
+    "category": "process",
+    "command_line": {"contains_any": ["systeminfo", "ipconfig /all", "quser", "net config"]}
+  },
+  "mitre_attack": ["T1082"],
+  "tags": ["discovery", "recon", "endpoint"]
+}
