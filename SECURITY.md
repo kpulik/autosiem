@@ -2,18 +2,18 @@
 
 ## Supported Versions
 
-AutoSIEM is currently in alpha (`v0.1.0`). Security updates are applied directly to the `master` branch.
+AutoSIEM is currently in alpha (`v0.1.0`). Security updates are applied directly to the `main` branch.
 
 | Version | Supported |
 |---|---|
-| 0.1.x (master) | :white_check_mark: Yes |
+| 0.1.x (main) | :white_check_mark: Yes |
 | < 0.1.0 | :x: No |
 
 ## Reporting a Vulnerability
 
 If you discover a security vulnerability in AutoSIEM, please report it privately:
 
-1. **Email**: Send details to `security@autosiem.local` (or open a GitHub Security Advisory).
+1. **GitHub Security Advisory**: Please report vulnerabilities privately through GitHub Security Advisories.
 2. **Details**: Include affected component, steps to reproduce, impact, and proposed fix if available.
 3. **Response Time**: We acknowledge reports within 48 hours and aim for a fix within 7 days.
 
