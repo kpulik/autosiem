@@ -1,16 +1,27 @@
 """Approval-gated SOAR runbook recommendation.
 
-Given an incident, recommend which runbook actions make sense, then gate each
-action through the automation policy. High/critical-risk actions are never
-auto-executed -- they are always marked ``approval_required`` so a human signs
-off before anything irreversible or destructive runs.
+Given an incident, recommend which runbook actions make sense, resolve what each
+action should act on, then gate it through the automation policy. High/critical-risk
+actions are never auto-executed -- they are always marked ``approval_required`` so a
+human signs off before anything irreversible or destructive runs.
+
+Runbooks are keyed by MITRE technique, but a technique is a scope, not a thing you
+can act on. Steps that operate on something concrete -- an account, an endpoint, an
+indicator -- are resolved against the incident's entities, and dropped when the
+incident holds nothing of the required kind. See ``policy.ActionPolicy.target_kinds``.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
 
-from .policy import AutomationPolicy, DEFAULT_ACTION_POLICIES
+from .policy import (
+    AutomationPolicy,
+    DEFAULT_ACTION_POLICIES,
+    DEFAULT_NOTIFY_CHANNEL,
+    base_technique,
+    classify_target,
+)
 from .schemas import Incident
 
 # Runbook actions spelled identically to the policy action names where possible
@@ -107,6 +118,9 @@ class SoarPlanner:
         self.library = library or _default_library()
         self.policy = policy or AutomationPolicy()
         self.plan: list[dict[str, Any]] = []
+        #: Steps the last ``recommend`` could not target, so callers can report
+        #: them instead of silently losing a runbook step.
+        self.dropped: list[dict[str, str]] = []
 
     def recommend(
         self,
@@ -115,43 +129,105 @@ class SoarPlanner:
         method: str = "local",
         policy: AutomationPolicy | None = None,
     ) -> list[dict[str, Any]]:
-        """Build and store the plan of proposed actions for an incident."""
+        """Build and store the plan of proposed actions for an incident.
+
+        One step can produce several proposals: a runbook says "isolate the
+        host", and an incident spanning three hosts needs three proposals.
+        """
         policy = policy or self.policy
         confidence = _confidence_for(findings)
         findings = findings or []
         self.plan = []
+        self.dropped = []
 
         for recommendation in self.library.recommend(incident):
             technique = recommendation["technique"]
             for action in recommendation["actions"]:
-                proposal = self._propose(action, technique, confidence, policy)
-                if proposal is not None:
-                    self.plan.append(proposal)
+                if action not in _POLICY_NAMES:
+                    # Unknown action: surface for human review, scoped to the
+                    # only thing known about it -- the runbook's technique.
+                    self.plan.append(self._unknown_action(action, technique, confidence))
+                    continue
+                targets = self._targets_for(action, incident, technique, policy)
+                if not targets:
+                    self.dropped.append(
+                        {
+                            "action": action,
+                            "technique": technique,
+                            "reason": (
+                                f"incident has no {'/'.join(policy.target_kinds_for(action))} "
+                                "entity to act on"
+                            ),
+                        }
+                    )
+                    continue
+                for target in targets:
+                    proposal = self._propose(action, technique, target, confidence, policy)
+                    if proposal is not None:
+                        self.plan.append(proposal)
         return self.plan
+
+    def _targets_for(
+        self,
+        action: str,
+        incident: Incident,
+        technique: str,
+        policy: AutomationPolicy,
+    ) -> list[str]:
+        """Resolve what a runbook step should act on.
+
+        Investigation and notification steps stay scoped to the runbook's
+        technique, which is what they are actually about. Steps that act on
+        something concrete are resolved against the incident's entities of the
+        kind the action accepts, and return empty when the incident holds none --
+        an ``isolate_host`` proposal without a host is not actionable.
+        """
+        kinds = policy.target_kinds_for(action)
+        if not kinds:
+            return []
+        if "technique" in kinds:
+            # The runbook is written for the parent technique, so that is the
+            # scope of the step even when a sub-technique triggered it.
+            return [base_technique(technique)]
+        matched = [entity for entity in incident.entities if classify_target(entity) in kinds]
+        if matched:
+            return matched
+        if "channel" in kinds:
+            return [DEFAULT_NOTIFY_CHANNEL]
+        if "incident" in kinds:
+            return [f"incident:{incident.incident_id}"]
+        return []
+
+    def _unknown_action(self, action: str, technique: str, confidence: float) -> dict[str, Any]:
+        return {
+            "action": action,
+            "description": f"Unknown action '{action}' — needs human review.",
+            "approval_required": True,
+            "technique": technique,
+            "target": technique,
+            "confidence": confidence,
+            "allowed": False,
+        }
 
     def _propose(
         self,
         action: str,
         technique: str,
+        target: str,
         confidence: float,
         policy: AutomationPolicy,
     ) -> dict[str, Any] | None:
-        if action not in _POLICY_NAMES:
-            # Unknown action: surface as proposal but force approval.
-            return {
-                "action": action,
-                "description": f"Unknown action '{action}' — needs human review.",
-                "approval_required": True,
-                "technique": technique,
-                "confidence": confidence,
-                "allowed": False,
-            }
+        valid, target_reason = policy.validate_target(action, target)
+        if not valid:
+            self.dropped.append({"action": action, "technique": technique, "reason": target_reason})
+            return None
         allowed, approval_required, reason = policy.decision_for_action(action, confidence)
         proposal = {
             "action": action,
             "description": reason,
             "approval_required": approval_required,
             "technique": technique,
+            "target": target,
             "confidence": confidence,
             "allowed": allowed,
         }
@@ -159,6 +235,10 @@ class SoarPlanner:
         risk = policy.action_policies[action].risk
         if risk in ("high", "critical") and not approval_required:
             proposal["approval_required"] = True
+            # ...and must not stay flagged executable while requiring approval:
+            # `allowed` is what an executor reads, so leaving it set would make
+            # the approval requirement advisory.
+            proposal["allowed"] = False
         return proposal
 
 

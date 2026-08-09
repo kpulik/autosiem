@@ -12,6 +12,7 @@ from .enrichment import EnrichmentRegistry
 from .feedback import FeedbackEngine
 from .llm import LLMService
 from .normalization import normalize, parse_raw_line
+from .policy import base_technique, classify_target
 from .rag import RagEngine
 from .risk import build_incidents
 from .rules import load_rules
@@ -20,6 +21,18 @@ from .soar import SoarPlanner
 from .soc_runtime import AIAnalystRuntime, ActionProposal, EventSearcher, Investigation
 from .suppression import SuppressionEngine
 from .threat_intel import ThreatIntelMatcher
+
+
+def _dedup_key(target: str) -> str:
+    """Dedup identity for a proposal target.
+
+    Sub-techniques collapse onto their parent (T1059.001 -> T1059) so one
+    runbook is not applied twice. Everything else is compared verbatim: an IP
+    contains dots too, and 198.51.100.25 must stay distinct from .55.
+    """
+    if classify_target(target) == "technique":
+        return base_technique(target)
+    return target
 
 
 @dataclass(slots=True)
@@ -153,23 +166,39 @@ class AutoSIEMPipeline:
 
         Steps are appended as ``ActionProposal`` objects (deduped against what
         the runtime already proposed) so they flow through the same persistence
-        and UI approval workflow.
+        and UI approval workflow. Each step carries the target the planner
+        resolved; it is re-checked against the action's declared target kinds
+        here so nothing reaches the approval queue pointed at the wrong kind of
+        thing, whatever produced the plan.
         """
-        plan = self.soar.recommend(incident, findings) if self.soar else []
+        if self.soar is None:
+            return investigation
+        plan = self.soar.recommend(incident, findings)
+        policy = self.soar.policy
+        for drop in self.soar.dropped:
+            investigation.audit_log.append(
+                f"soar_step_dropped action={drop['action']} technique={drop['technique']} "
+                f"reason={drop['reason']}"
+            )
         if not plan:
             return investigation
-        # Dedup on the base technique so a sub-technique (e.g. T1059.001) does
-        # not duplicate its parent's (e.g. T1059) runbook steps.
-        def _base(technique: str) -> str:
-            return technique.split(".")[0] if "." in technique else technique
 
-        existing = {(proposal.action, _base(proposal.target)) for proposal in investigation.action_proposals}
+        existing = {
+            (proposal.action, _dedup_key(proposal.target))
+            for proposal in investigation.action_proposals
+        }
         added: list[ActionProposal] = []
         for step in plan:
             action = str(step.get("action", ""))
-            technique = str(step.get("technique") or (incident.entities[0] if incident.entities else "unknown"))
-            target = _base(technique)
-            if (action, target) in existing:
+            target = str(step.get("target", "")).strip()
+            valid, reason = policy.validate_target(action, target)
+            if not valid:
+                investigation.audit_log.append(
+                    f"soar_step_rejected action={action} target={target or '<none>'} reason={reason}"
+                )
+                continue
+            key = (action, _dedup_key(target))
+            if key in existing:
                 continue
             proposal = ActionProposal(
                 proposal_id=str(uuid4()),
@@ -182,7 +211,7 @@ class AutoSIEMPipeline:
                 policy_reason=str(step.get("description", "SOAR runbook step.")),
             )
             investigation.action_proposals.append(proposal)
-            existing.add((action, target))
+            existing.add(key)
             added.append(proposal)
         if added:
             investigation.audit_log.append(f"soar_plan_applied proposals={len(added)}")

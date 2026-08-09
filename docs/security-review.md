@@ -391,3 +391,37 @@ accepted from an `autosiem_token` cookie, and CSRF validation was changed from
 opt-in to on-by-default (per-process secret when `AUTOSIEM_CSRF_SECRET` is
 unset, tokens bound to the form's target path) so cookie auth does not
 introduce a CSRF hole. Covered by `tests/test_ui_auth.py`.
+
+## SEC-018 — Model-reported confidence could authorize autonomous containment (fixed 2026-08-08)
+
+**Severity:** High (latent — unreachable at the default autonomy level). **Status:** Fixed.
+
+`AIAnalystRuntime` passed `decision.confidence` straight into
+`AutomationPolicy.decision_for_action`, and at `POLICY_BOUNDED_AUTONOMOUS_RESPONSE`
+(level 4) a high-risk action above `minimum_confidence_for_policy_bounded_response`
+(0.98) executes with no human in the loop. When the decision came from the optional
+LLM, that number was self-reported by the model and only clamped to `[0.0, 1.0]`.
+A model returning `{"decision_type": "containment_proposed", "confidence": 1.0}` —
+whether hallucinating or steered by prompt injection through ingested event text
+(see SEC-010) — could therefore authorize its own `disable_user` / `isolate_host` /
+`block_indicator` execution. The untrusted component controlled its own
+authorization signal.
+
+Not reachable in a default install: autonomy defaults to level 2
+(`REVERSIBLE_AUTOMATION`), where high-risk actions are proposal-only. The exposure
+was for operators who deliberately opted into level 4.
+
+A related inconsistency sat next to it: `soar.py` forced `approval_required = True`
+on high/critical steps but left `allowed` set, so a level-4 SOAR step could be
+persisted as `executable_now=True` *and* `approval_required=True` — and
+`executable_now` is what a downstream executor reads.
+
+**Fix:** `AnalystDecision.confidence_source` records whether a score is
+`deterministic` (derived by AutoSIEM from the evidence) or `model` (self-reported),
+and `decision_for_action` accepts it. A `model` score never satisfies the
+policy-bounded autonomous branch — it falls back to human approval regardless of
+value. Raising the threshold instead was rejected: a model that will assert 0.99
+will assert 0.999. The deterministic level-4 capability is unchanged. The source is
+written to the audit log (`action_proposed ... confidence_source=model`) and
+persisted with the investigation. `soar.py` now clears `allowed` whenever it forces
+approval. Covered by `tests/test_autonomy_gate.py` (17 tests).

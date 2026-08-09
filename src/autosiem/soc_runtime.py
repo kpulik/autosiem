@@ -6,7 +6,7 @@ from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
-from .policy import AutomationPolicy
+from .policy import DEFAULT_NOTIFY_CHANNEL, AutomationPolicy, ConfidenceSource
 from .schemas import Finding, Incident, Severity
 
 #: Events pulled per entity when the runtime searches for related telemetry.
@@ -99,6 +99,10 @@ class AnalystDecision:
     confidence: float
     rationale: str
     recommended_owner: str
+    #: Whether ``confidence`` was derived from the evidence or self-reported by
+    #: a language model. Only the former can satisfy the autonomous gate, and it
+    #: is persisted so an auditor can see which one drove the case.
+    confidence_source: ConfidenceSource = "deterministic"
 
 
 @dataclass(slots=True)
@@ -643,6 +647,9 @@ class AIAnalystRuntime:
             confidence=confidence,
             rationale=str(override.get("rationale", "LLM-provided decision.")),
             recommended_owner=str(override.get("recommended_owner", "tier-2-analyst")),
+            # The model reported this number about its own output. It informs
+            # the analyst; it does not authorize anything.
+            confidence_source="model",
         )
 
     def _propose_actions(
@@ -658,16 +665,30 @@ class AIAnalystRuntime:
             for entity in incident.entities:
                 if entity.startswith("user:"):
                     proposed.append(("disable_user", entity, "Potential compromised identity; disable or force reset after approval."))
-                if entity.startswith("host:") and "vpn" not in entity.lower():
+                if entity.startswith("host:"):
                     proposed.append(("isolate_host", entity, "Endpoint is associated with high-risk execution activity."))
                 if entity.startswith("ip:"):
                     proposed.append(("block_indicator", entity, "Source IP appears in suspicious incident context."))
         elif decision.decision_type == DecisionType.ESCALATE:
-            proposed.append(("notify_channel", "soc-escalations", "Notify escalation channel with investigation summary."))
+            proposed.append((
+                "notify_channel",
+                DEFAULT_NOTIFY_CHANNEL,
+                "Notify escalation channel with investigation summary.",
+            ))
 
         proposals: list[ActionProposal] = []
         for action, target, rationale in proposed:
-            executable, approval_required, reason = self.policy.decision_for_action(action, confidence)
+            # Second gate, independent of where the proposal came from: an
+            # action may only be raised against a kind of target its policy
+            # accepts. Keeps a future LLM-driven proposer from asking to
+            # isolate an ATT&CK technique.
+            valid, target_reason = self.policy.validate_target(action, target)
+            if not valid:
+                audit.append(f"action_rejected action={action} target={target} reason={target_reason}")
+                continue
+            executable, approval_required, reason = self.policy.decision_for_action(
+                action, confidence, confidence_source=decision.confidence_source
+            )
             proposals.append(
                 ActionProposal(
                     proposal_id=str(uuid4()),
@@ -680,5 +701,5 @@ class AIAnalystRuntime:
                     policy_reason=reason,
                 )
             )
-            audit.append(f"action_proposed action={action} target={target} executable={executable} approval_required={approval_required} confidence={confidence:.2f}")
+            audit.append(f"action_proposed action={action} target={target} executable={executable} approval_required={approval_required} confidence={confidence:.2f} confidence_source={decision.confidence_source}")
         return proposals

@@ -52,9 +52,50 @@ High-impact actions are proposed and require approval:
 - block indicator
 - close incident
 
+## Whose confidence opens the gate
+
+At `POLICY_BOUNDED_AUTONOMOUS_RESPONSE` (level 4, never the default) a high-risk
+action above `minimum_confidence_for_policy_bounded_response` may execute without
+a human. That makes the confidence score an authorization signal, so where it
+came from matters.
+
+`AnalystDecision.confidence_source` records it: `deterministic` when AutoSIEM
+derived the score from the evidence, `model` when a language model reported it
+about its own output. **Only a deterministic score can open the autonomous
+gate.** A model-reported score always falls back to human approval, however high
+it is — a model asserting 0.99 is not evidence, and raising the threshold would
+only invite it to assert 0.999. Otherwise a model could authorize its own
+containment action simply by claiming certainty.
+
+The source is carried on the decision, written to the investigation audit log
+(`action_proposed ... confidence_source=model`), and persisted with the
+investigation, so an auditor can see which one drove any given case.
+
+## Valid action targets
+
+Risk is only half of what makes a proposal safe; the other half is *what* it
+points at. Every action declares the target kinds it accepts in
+`policy.ActionPolicy.target_kinds`, and `AutomationPolicy.validate_target`
+enforces it on every path that can create a proposal — the analyst runtime, the
+SOAR planner, and the pipeline merge.
+
+| Action | Valid targets |
+|---|---|
+| `isolate_host` | `host:` (shared infrastructure such as a VPN concentrator is excluded) |
+| `disable_user` | `user:` |
+| `block_indicator` | `ip:` / `domain:` / `url:` / hash |
+| `notify_channel` | `channel:`, an ATT&CK technique, or an incident |
+| `close_incident` | `incident:` |
+| `search_related_events`, `enrich_entities`, `create_case_note`, `link_duplicate_alerts` | any entity, an ATT&CK technique, or an incident |
+
+Validation is fail-closed on both sides: an action the policy does not know has
+no valid targets, and a target that cannot be classified is rejected rather than
+guessed at. Rejections and dropped runbook steps are written to the
+investigation audit log with the reason, so nothing disappears silently.
+
 ## Why deterministic first?
 
-The runtime keeps a deterministic core as its safe baseline. An optional LLM adapter (see below) can now author the narrative report and propose a decision, but that output is schema-validated, redacted, and still run through the same policy gates before any action can execute. When no model is configured or a call fails, behaviour falls back to this local deterministic baseline automatically, so the pipeline never breaks.
+The runtime keeps a deterministic core as its safe baseline. An optional LLM adapter (see below) can now author the narrative report and propose a decision, but that output is schema-validated, redacted, marked as model-sourced, and still run through the same policy gates before any action can execute — and a model-reported confidence can never satisfy the autonomous gate (see above). When no model is configured or a call fails, behaviour falls back to this local deterministic baseline automatically, so the pipeline never breaks.
 
 ## Optional LLM adapter
 
@@ -118,7 +159,7 @@ The copilot-facing modules are implemented, unit-tested, and **wired into the CL
 - **Natural-language search** (`autosiem.querygen`) — `translate_query("failed logins by alice last 24h")` → canonical DSL dict → `to_cli_flags()` for `cli events`/`incidents` — wired as CLI `search-nl` + `GET /api/search-nl`.
 - **Rule assistant** (`autosiem.rule_assistant`) — `draft_rule(description, techniques)` returns a rule dict; `write_rule_file` + `generate_test_cases` ship it with a `tests/test_rules.py` entry — wired as CLI `rule-new`.
 - **Feedback learning** (`autosiem.feedback`) — `FeedbackEngine` records analyst approve/reject/comment decisions and derives per-rule trust weights that can de-prioritize noisy rules — wired into `AutoSIEMPipeline`.
-- **SOAR planner** (`autosiem.soar`) — `SoarPlanner.recommend(incident, findings)` returns an ordered, approval-gated plan (runbook steps + proposed actions) — merged into `Investigation.action_proposals` in `AutoSIEMPipeline`.
+- **SOAR planner** (`autosiem.soar`) — `SoarPlanner.recommend(incident, findings)` returns an ordered, approval-gated plan (runbook steps + proposed actions) — merged into `Investigation.action_proposals` in `AutoSIEMPipeline`. Runbooks are keyed by ATT&CK technique, but a technique is a *scope*, not something you can act on: steps that operate on a concrete thing are resolved against the incident's entities (see below), and dropped with a stated reason when the incident holds nothing of the required kind.
 - **Update job** (`autosiem.update_job`) — `UpdateJob.run_once()` refreshes bundled rule/threat-intel content from configured URLs and writes an `UpdateReport`; `schedule()` runs it on a timer — wired as CLI `update`.
 - **Redaction** now lives in its own module: `autosiem.redaction` deepens per-class policy (labelled secrets, AKIA/SSH keys, Luhn-checked card numbers, SSN, IP/email/IPv6). `llm.py` re-exports `Redactor`, so `autosiem.llm.Redactor` still works unchanged.
 
