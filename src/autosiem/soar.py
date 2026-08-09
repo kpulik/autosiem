@@ -22,7 +22,7 @@ from .policy import (
     base_technique,
     classify_target,
 )
-from .schemas import Incident
+from .schemas import Finding, Incident, Severity
 
 # Runbook actions spelled identically to the policy action names where possible
 # so the heuristic match is trivial. Any action not in the policy table is
@@ -30,11 +30,31 @@ from .schemas import Incident
 _POLICY_NAMES = set(DEFAULT_ACTION_POLICIES)
 
 
-def _confidence_for(findings: list[Any] | None) -> float:
-    """Heuristic confidence from available findings: higher severity => higher."""
+#: Ceiling on a runbook-match confidence. Severity and corroboration can make a
+#: recommendation strong; they cannot make it certain. Kept below
+#: ``minimum_confidence_for_policy_bounded_response`` so a runbook match on its
+#: own is never what opens the autonomous gate.
+MAX_PLAN_CONFIDENCE = 0.90
+
+#: Findings past this point stop adding corroboration. A fourth alert on the
+#: same technique says little the third did not.
+_CORROBORATION_CAP = 3
+
+
+def _confidence_for(findings: list[Finding] | None) -> float:
+    """Confidence that a runbook fits this incident.
+
+    Severity carries most of the signal and corroborating findings add the rest
+    with diminishing returns, floored at 0.50 when there is no evidence at all
+    and capped at ``MAX_PLAN_CONFIDENCE``: counting alerts can make a
+    recommendation strong, never certain.
+    """
     if not findings:
-        return 0.8
-    return max(0.5, min(1.0, 0.7 + 0.1 * min(len(findings), 3)))
+        return 0.50
+    severity = max(finding.severity for finding in findings)
+    corroboration = min(len(findings), _CORROBORATION_CAP) / _CORROBORATION_CAP
+    score = 0.50 + 0.25 * (severity.value / Severity.CRITICAL.value) + 0.15 * corroboration
+    return round(min(score, MAX_PLAN_CONFIDENCE), 2)
 
 
 @dataclass(slots=True)
@@ -125,7 +145,7 @@ class SoarPlanner:
     def recommend(
         self,
         incident: Incident,
-        findings: list[Any] | None = None,
+        findings: list[Finding] | None = None,
         method: str = "local",
         policy: AutomationPolicy | None = None,
     ) -> list[dict[str, Any]]:

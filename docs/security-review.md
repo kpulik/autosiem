@@ -424,4 +424,13 @@ value. Raising the threshold instead was rejected: a model that will assert 0.99
 will assert 0.999. The deterministic level-4 capability is unchanged. The source is
 written to the audit log (`action_proposed ... confidence_source=model`) and
 persisted with the investigation. `soar.py` now clears `allowed` whenever it forces
-approval. Covered by `tests/test_autonomy_gate.py` (17 tests).
+approval. Covered by `tests/test_autonomy_gate.py`.
+
+**Follow-up hardening (same day):** `soar._confidence_for` returned a flat `1.0`
+for any incident with three or more findings and never read severity at all,
+despite a docstring saying it did, so a burst of low-severity alerts scored as
+certainty. It now derives from the highest severity present plus corroboration
+with diminishing returns, and is capped at `MAX_PLAN_CONFIDENCE` (0.90), which
+sits below `minimum_confidence_for_policy_bounded_response` by construction.
+Matching a runbook is therefore never on its own sufficient to open the
+autonomous gate, whatever the alert volume.

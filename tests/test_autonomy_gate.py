@@ -21,7 +21,7 @@ from autosiem.pipeline import AutoSIEMPipeline
 from autosiem.policy import AutomationPolicy, AutonomyLevel
 from autosiem.rules import load_rules
 from autosiem.schemas import Finding, Incident, Severity
-from autosiem.soar import SoarPlanner
+from autosiem.soar import MAX_PLAN_CONFIDENCE, SoarPlanner, _confidence_for
 from autosiem.soc_runtime import AIAnalystRuntime
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -235,11 +235,85 @@ def test_audit_log_records_the_confidence_source() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_soar_high_risk_step_is_not_both_executable_and_approval_gated() -> None:
-    """`allowed` is what an executor reads; leaving it set makes approval advisory."""
-    plan = SoarPlanner(policy=_autonomous_policy()).recommend(
-        _critical_incident(), findings=[1, 2, 3]
+def _finding(severity: Severity, index: int = 1) -> Finding:
+    return Finding(
+        finding_id=f"F-{index}",
+        rule_id="AUTO-TEST-001",
+        rule_name="Test rule",
+        event_id=f"E-{index}",
+        timestamp=datetime(2026, 8, 8, 12, 0, tzinfo=timezone.utc),
+        severity=severity,
+        risk_points=10,
+        entities=["user:alice"],
+        mitre_attack=["T1059"],
+        evidence={},
     )
+
+
+def test_plan_confidence_never_claims_certainty() -> None:
+    """Counting alerts cannot establish certainty, however many there are."""
+    for count in (1, 3, 10, 50):
+        findings = [_finding(Severity.CRITICAL, index) for index in range(count)]
+        assert _confidence_for(findings) <= MAX_PLAN_CONFIDENCE < 1.0, count
+
+
+def test_plan_confidence_rises_with_severity() -> None:
+    """The score reflects severity, which is what the heuristic claims to use."""
+    scores = [
+        _confidence_for([_finding(severity)])
+        for severity in (Severity.INFORMATIONAL, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL)
+    ]
+    assert scores == sorted(scores)
+    assert scores[0] < scores[-1]
+
+
+def test_plan_confidence_rises_with_corroboration() -> None:
+    single = _confidence_for([_finding(Severity.HIGH, 1)])
+    triple = _confidence_for([_finding(Severity.HIGH, index) for index in range(3)])
+    assert triple > single
+
+
+def test_no_evidence_scores_lowest() -> None:
+    """No findings must not outrank an actual finding."""
+    none_at_all = _confidence_for(None)
+    empty = _confidence_for([])
+    weakest_real = _confidence_for([_finding(Severity.INFORMATIONAL)])
+    assert none_at_all == empty
+    assert none_at_all < weakest_real
+
+
+def test_soar_confidence_cannot_reach_the_autonomous_threshold() -> None:
+    """A runbook match alone is never enough to open the level-4 gate.
+
+    The planner's confidence is capped below
+    ``minimum_confidence_for_policy_bounded_response``, so even a pile of
+    critical findings leaves a human in the loop.
+    """
+    policy = _autonomous_policy()
+    assert MAX_PLAN_CONFIDENCE < policy.minimum_confidence_for_policy_bounded_response
+    findings = _max_confidence_findings() * 4
+    assert _confidence_for(findings) <= MAX_PLAN_CONFIDENCE
+    plan = SoarPlanner(policy=policy).recommend(_critical_incident(), findings=findings)
+    high_risk = [step for step in plan if step["action"] in HIGH_RISK_ACTIONS]
+    assert high_risk
+    assert all(step["approval_required"] is True for step in high_risk)
+    assert all(step["allowed"] is False for step in high_risk)
+
+
+def test_soar_high_risk_step_is_not_both_executable_and_approval_gated() -> None:
+    """`allowed` is what an executor reads; leaving it set makes approval advisory.
+
+    Reaching the safety net needs an operator who has lowered the autonomous
+    threshold under the planner's ceiling, which is the only way a SOAR step
+    comes back from the policy as executable in the first place.
+    """
+    policy = AutomationPolicy(
+        autonomy_level=AutonomyLevel.POLICY_BOUNDED_AUTONOMOUS_RESPONSE,
+        minimum_confidence_for_policy_bounded_response=0.80,
+    )
+    findings = _max_confidence_findings()
+    assert _confidence_for(findings) >= 0.80, "test needs the policy branch to be reachable"
+    plan = SoarPlanner(policy=policy).recommend(_critical_incident(), findings=findings)
     high_risk = [step for step in plan if step["action"] in HIGH_RISK_ACTIONS]
     assert high_risk
     for step in high_risk:

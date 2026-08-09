@@ -71,6 +71,11 @@ The source is carried on the decision, written to the investigation audit log
 (`action_proposed ... confidence_source=model`), and persisted with the
 investigation, so an auditor can see which one drove any given case.
 
+The SOAR planner scores separately, from the severity and weight of the findings
+behind the incident, and its ceiling (`soar.MAX_PLAN_CONFIDENCE`, 0.90) sits
+below the autonomous threshold by construction. Matching a runbook is therefore
+never on its own enough to open the gate, whatever the alert volume.
+
 ## Valid action targets
 
 Risk is only half of what makes a proposal safe; the other half is *what* it
