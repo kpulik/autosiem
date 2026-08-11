@@ -27,6 +27,7 @@ from .attack_matrix import (
     refresh_index,
 )
 from .coverage import coverage_report
+from .kev import default_kev_state, refresh_kev
 from .net import require_https
 from .rules import load_rules
 from .threat_intel import (
@@ -53,6 +54,9 @@ class UpdateReport:
     #: Newest version MITRE publishes, when a refresh was attempted.
     attack_latest: str = ""
     attack_refreshed: bool = False
+    #: CISA KEV catalogue version the cache holds, when a refresh was attempted.
+    kev_version: str = ""
+    kev_refreshed: bool = False
     messages: list[str] = field(default_factory=list)
 
 
@@ -70,6 +74,9 @@ class UpdateJob:
         refresh_attack: bool = False,
         attack_version: str | None = None,
         attack_fetch: Fetcher | None = None,
+        kev_path: str | Path | None = None,
+        refresh_kev_catalog: bool = False,
+        kev_fetch: Fetcher | None = None,
     ) -> None:
         self.rules_dir = Path(rules_dir)
         self.db_path = Path(db_path) if db_path is not None else None
@@ -82,6 +89,9 @@ class UpdateJob:
         self.attack_version = attack_version
         #: Injected in tests so the suite never touches the network.
         self.attack_fetch = attack_fetch
+        self.kev_path = Path(kev_path) if kev_path is not None else None
+        self.refresh_kev_catalog = refresh_kev_catalog
+        self.kev_fetch = kev_fetch
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -95,6 +105,7 @@ class UpdateJob:
         report.coverage = coverage_report(rules, matrix=self._attack_matrix(report))
         report.attack_version = str(report.coverage.get("matrix", {}).get("attack_version", ""))
 
+        self._refresh_kev(report)
         indicators = self._load_indicators(report)
         if indicators:
             state_path = self.intel_state_path or default_intel_state(self.db_path or "autosiem.db")
@@ -145,6 +156,25 @@ class UpdateJob:
         except AttackMatrixUnavailable:
             # Nothing refreshed yet; the vendored matrix still answers.
             return None
+
+    def _refresh_kev(self, report: UpdateReport) -> None:
+        """Refresh the CISA known-exploited catalogue, if asked.
+
+        Cached beside the database rather than vendored: KEV gains entries
+        weekly, and a stale copy would report "not known exploited" for a CVE
+        added last Tuesday, which is worse than reporting nothing.
+        """
+        if not self.refresh_kev_catalog:
+            return
+        dest = self.kev_path or default_kev_state(self.db_path or "autosiem.db")
+        try:
+            result = refresh_kev(dest, fetch=self.kev_fetch)
+            report.kev_refreshed = result.refreshed
+            report.kev_version = result.catalog_version
+            report.messages.append(result.message)
+        except Exception as exc:  # a flaky feed must not fail the whole cycle
+            report.kev_refreshed = False
+            report.messages.append(f"kev refresh failed: {exc}")
 
     def _load_indicators(self, report: UpdateReport) -> list[Any]:
         """Fetch indicators from intel_url or intel_path; report failures."""
@@ -210,6 +240,8 @@ def run_update(
     attack_index_path: str | Path | None = None,
     refresh_attack: bool = False,
     attack_version: str | None = None,
+    kev_path: str | Path | None = None,
+    refresh_kev_catalog: bool = False,
 ) -> UpdateReport:
     """Convenience: run one update cycle and return the report."""
     return UpdateJob(
@@ -221,4 +253,6 @@ def run_update(
         attack_index_path=attack_index_path,
         refresh_attack=refresh_attack,
         attack_version=attack_version,
+        kev_path=kev_path,
+        refresh_kev_catalog=refresh_kev_catalog,
     ).run_once()

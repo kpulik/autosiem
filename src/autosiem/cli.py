@@ -224,6 +224,12 @@ def main() -> None:
         "--attack-index",
         help="Where the refreshed ATT&CK index lives (default: <db>.attack.json)",
     )
+    update.add_argument(
+        "--refresh-kev",
+        action="store_true",
+        help="Fetch CISA's known-exploited-vulnerabilities catalogue for vulnerability enrichment (network)",
+    )
+    update.add_argument("--kev-file", help="Where the KEV cache lives (default: <db>.kev.json)")
     _add_db_arg(update)
 
     metrics = sub.add_parser("metrics", help="Export Prometheus-format metrics")
@@ -380,6 +386,8 @@ def main() -> None:
             attack_index_path=args.attack_index,
             refresh_attack=args.refresh_attack,
             attack_version=args.attack_version,
+            kev_path=args.kev_file,
+            refresh_kev_catalog=args.refresh_kev,
         )
         _print_json({
             "rules_loaded": report.rules_loaded,
@@ -389,6 +397,8 @@ def main() -> None:
             "attack_version": report.attack_version,
             "attack_latest": report.attack_latest or None,
             "attack_refreshed": report.attack_refreshed,
+            "kev_version": report.kev_version or None,
+            "kev_refreshed": report.kev_refreshed,
             "matrix_technique_percent": report.coverage.get("matrix", {}).get("technique_percent"),
             "intel_refreshed": report.intel_refreshed,
             "messages": report.messages,

@@ -1,11 +1,12 @@
-"""Entity enrichment: asset, identity, network and threat-intel context.
+"""Entity enrichment: asset, identity, network, threat-intel and vulnerability context.
 
 Findings say *what* happened. Enrichment says *what it happened to*, which is
 what decides whether an analyst cares: the same failed login means one thing on
 a lab box and another on a domain controller owned by finance.
 
 Every source here is local and free - an asset inventory export, an identity
-export, CIDR definitions, and the STIX indicators AutoSIEM already loads. No
+export, CIDR definitions, the STIX indicators AutoSIEM already loads, and a
+vulnerability export crossed with CISA's public known-exploited catalogue. No
 commercial reputation API and no API keys, so enrichment never costs money and
 never leaks entity names to a third party. Standard library only.
 
@@ -22,6 +23,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Protocol, runtime_checkable
+
+from .kev import EMPTY_CATALOG, load_kev_state, normalize_cve
 
 # --- criticality -----------------------------------------------------------
 CRITICALITY_LEVELS = ("low", "medium", "high", "critical")
@@ -448,6 +451,97 @@ class ThreatIntelEnricher:
         )
 
 
+# --- vulnerability ---------------------------------------------------------
+class VulnerabilityEnricher:
+    """Vulnerability inventory crossed with CISA's known-exploited catalogue.
+
+    A host having open CVEs is background noise; a host having a CVE that is
+    *being exploited right now* is the thing an analyst should look at first.
+    That is the whole point of KEV, and it is why criticality is only raised for
+    the KEV subset. A host with fifty unexploited CVEs stays where it was.
+
+    The inventory is a local export (same loader as the asset connector) with
+    records like::
+
+        {"host": "web-01", "cves": ["CVE-2026-8037", "CVE-2021-44228"]}
+
+    Accepted keys: ``host``/``hostname``/``asset_id``/``name`` for the host, and
+    ``cves``/``cve_ids``/``vulnerabilities`` for the list.
+    """
+
+    name = "vulnerability"
+
+    def __init__(self, records: Iterable[Mapping[str, Any]] = (), catalog: Any | None = None) -> None:
+        self._by_host: dict[str, list[str]] = {}
+        for record in records:
+            host = _first(record, "host", "hostname", "asset_id", "name")
+            if not host:
+                continue
+            raw = _first(record, "cves", "cve_ids", "vulnerabilities") or []
+            if isinstance(raw, str):
+                raw = [raw]
+            cves: list[str] = []
+            for item in raw:
+                # Accept a bare ID or a nested record with one.
+                value = item.get("cve") or item.get("cveID") or item.get("id") if isinstance(item, Mapping) else item
+                cve = normalize_cve(value)
+                if cve and cve not in cves:
+                    cves.append(cve)
+            if cves:
+                self._by_host[str(host).strip().lower()] = cves
+        self._catalog = catalog if catalog is not None else EMPTY_CATALOG
+
+    @classmethod
+    def from_file(cls, path: str | Path, catalog: Any | None = None) -> "VulnerabilityEnricher":
+        return cls(load_records(path), catalog=catalog)
+
+    def __len__(self) -> int:
+        return len(self._by_host)
+
+    def enrich(self, entity: str) -> EntityContext | None:
+        kind, value = split_entity(entity)
+        if kind != "host":
+            return None
+        cves = self._by_host.get(value.strip().lower())
+        if not cves:
+            return None
+
+        exploited = [cve for cve in cves if cve in self._catalog]
+        ransomware = [cve for cve in exploited if self._catalog.is_ransomware(cve)]
+
+        attributes: dict[str, Any] = {
+            "cve_count": len(cves),
+            "known_exploited_count": len(exploited),
+            "known_exploited": exploited[:10],
+        }
+        if self._catalog.catalog_version:
+            attributes["kev_catalog_version"] = self._catalog.catalog_version
+        if ransomware:
+            attributes["ransomware_linked"] = ransomware[:10]
+
+        tags = ["vulnerable"]
+        criticality: str | None = None
+        if exploited:
+            # Only actively-exploited CVEs move priority. Otherwise every host
+            # with a patch backlog would outrank a clean crown-jewel server.
+            tags.append("known-exploited")
+            criticality = "high"
+        if ransomware:
+            tags.append("ransomware-linked")
+            criticality = "critical"
+        if not self._catalog.catalog_version:
+            # Say so rather than implying "nothing exploited" from an empty cache.
+            attributes["kev_catalog"] = "not loaded"
+
+        return EntityContext(
+            entity=entity,
+            source=self.name,
+            attributes=attributes,
+            criticality=criticality,
+            tags=tags,
+        )
+
+
 # --- registry --------------------------------------------------------------
 class EnrichmentRegistry:
     """Runs every configured enricher and merges what they return."""
@@ -523,6 +617,8 @@ def enrichment_from_env(env: Mapping[str, str] | None = None, indicators: Iterab
     ``AUTOSIEM_IDENTITY_FILE`` identity directory export
     ``AUTOSIEM_NETWORK_FILE``  ``{"corp-vpn": ["10.8.0.0/16"]}``
     ``AUTOSIEM_NETWORK_RANGES`` the same mapping inline as JSON
+    ``AUTOSIEM_VULN_FILE``     host -> CVE inventory export
+    ``AUTOSIEM_KEV_FILE``      cached CISA KEV catalogue (``<db>.kev.json``)
     """
     values = dict(os.environ) if env is None else dict(env)
     enrichers: list[Enricher] = []
@@ -559,5 +655,14 @@ def enrichment_from_env(env: Mapping[str, str] | None = None, indicators: Iterab
     intel = ThreatIntelEnricher(indicators)
     if len(intel):
         enrichers.append(intel)
+
+    # Vulnerability context is only meaningful with an inventory to read; the
+    # KEV cache on its own says nothing about any particular host.
+    vuln_path = values.get("AUTOSIEM_VULN_FILE")
+    if vuln_path:
+        catalog = load_kev_state(values.get("AUTOSIEM_KEV_FILE"))
+        vulnerability = VulnerabilityEnricher.from_file(vuln_path, catalog=catalog)
+        if len(vulnerability):
+            enrichers.append(vulnerability)
 
     return EnrichmentRegistry(enrichers)
