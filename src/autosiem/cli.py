@@ -214,6 +214,16 @@ def main() -> None:
     update.add_argument("--rules", default=str(DEFAULT_RULE_PATH), help="Rule file or directory")
     update.add_argument("--intel-url", help="STIX bundle URL to refresh threat intel from")
     update.add_argument("--intel-path", help="Local STIX bundle file to refresh threat intel from")
+    update.add_argument(
+        "--refresh-attack",
+        action="store_true",
+        help="Fetch MITRE's published ATT&CK Enterprise release and refresh the local matrix index (network)",
+    )
+    update.add_argument("--attack-version", help="Pin an ATT&CK version instead of tracking the newest")
+    update.add_argument(
+        "--attack-index",
+        help="Where the refreshed ATT&CK index lives (default: <db>.attack.json)",
+    )
     _add_db_arg(update)
 
     metrics = sub.add_parser("metrics", help="Export Prometheus-format metrics")
@@ -362,13 +372,23 @@ def main() -> None:
             rows = store.search_incidents(query=dsl.get("query"), entity=dsl.get("entity"), status=dsl.get("status"), limit=limit)
         _print_json({"translation": dsl, "cli": to_cli_flags(dsl), "target": args.target, "results": rows, "total": len(rows)})
     elif args.command == "update":
-        report = run_update(rules_dir=args.rules, db_path=args.db, intel_url=args.intel_url, intel_path=args.intel_path)
+        report = run_update(
+            rules_dir=args.rules,
+            db_path=args.db,
+            intel_url=args.intel_url,
+            intel_path=args.intel_path,
+            attack_index_path=args.attack_index,
+            refresh_attack=args.refresh_attack,
+            attack_version=args.attack_version,
+        )
         _print_json({
             "rules_loaded": report.rules_loaded,
             "unique_techniques": report.coverage.get("unique_techniques", 0),
             "watchlist_gap_count": report.coverage.get("watchlist_gap_count", 0),
             "watchlist_size": report.coverage.get("baseline", {}).get("technique_count", 0),
-            "attack_version": report.coverage.get("matrix", {}).get("attack_version"),
+            "attack_version": report.attack_version,
+            "attack_latest": report.attack_latest or None,
+            "attack_refreshed": report.attack_refreshed,
             "matrix_technique_percent": report.coverage.get("matrix", {}).get("technique_percent"),
             "intel_refreshed": report.intel_refreshed,
             "messages": report.messages,

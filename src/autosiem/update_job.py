@@ -1,9 +1,13 @@
-"""Hourly update job: reload rules, recompute coverage, refresh threat intel.
+"""Update job: reload rules, recompute coverage, refresh threat intel and ATT&CK.
 
 Designed to run as a daemon thread inside the SIEM process. ``run_once`` does
 one full refresh cycle and returns a report; ``schedule``/``start`` provide the
 thread wrapper. Nothing runs on import or at construction time, so tests and
 embedders stay in full control of when updates happen.
+
+Every network step is opt-in and off by default: rules are always re-read from
+disk, threat intel is fetched only when an ``intel_url``/``intel_path`` is given,
+and the ATT&CK matrix is refreshed only when ``refresh_attack`` is set.
 """
 from __future__ import annotations
 
@@ -14,6 +18,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .attack_matrix import (
+    AttackMatrix,
+    AttackMatrixUnavailable,
+    Fetcher,
+    default_attack_index,
+    load_matrix_file,
+    refresh_index,
+)
 from .coverage import coverage_report
 from .rules import load_rules
 from .threat_intel import (
@@ -35,6 +47,11 @@ class UpdateReport:
     rules_loaded: int = 0
     coverage: dict[str, Any] = field(default_factory=dict)
     intel_refreshed: bool = False
+    #: ATT&CK version the coverage figures were computed against.
+    attack_version: str = ""
+    #: Newest version MITRE publishes, when a refresh was attempted.
+    attack_latest: str = ""
+    attack_refreshed: bool = False
     messages: list[str] = field(default_factory=list)
 
 
@@ -48,12 +65,22 @@ class UpdateJob:
         intel_url: str | None = None,
         intel_path: str | Path | None = None,
         intel_state_path: str | Path | None = None,
+        attack_index_path: str | Path | None = None,
+        refresh_attack: bool = False,
+        attack_version: str | None = None,
+        attack_fetch: Fetcher | None = None,
     ) -> None:
         self.rules_dir = Path(rules_dir)
         self.db_path = Path(db_path) if db_path is not None else None
         self.intel_url = intel_url
         self.intel_path = Path(intel_path) if intel_path is not None else None
         self.intel_state_path = Path(intel_state_path) if intel_state_path is not None else None
+        self.attack_index_path = Path(attack_index_path) if attack_index_path is not None else None
+        self.refresh_attack = refresh_attack
+        #: Pin a specific ATT&CK release instead of tracking the newest.
+        self.attack_version = attack_version
+        #: Injected in tests so the suite never touches the network.
+        self.attack_fetch = attack_fetch
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -64,7 +91,8 @@ class UpdateJob:
 
         rules = load_rules(self.rules_dir)
         report.rules_loaded = len(rules)
-        report.coverage = coverage_report(rules)
+        report.coverage = coverage_report(rules, matrix=self._attack_matrix(report))
+        report.attack_version = str(report.coverage.get("matrix", {}).get("attack_version", ""))
 
         indicators = self._load_indicators(report)
         if indicators:
@@ -77,6 +105,45 @@ class UpdateJob:
             f"coverage: {report.coverage.get('unique_techniques', 0)} unique techniques across {report.rules_loaded} rules"
         )
         return report
+
+    def _attack_index_dest(self) -> Path:
+        """Where a refreshed index is written.
+
+        Never the copy inside the installed package: that would make an
+        installed wheel diverge from what was built and breaks read-only
+        installs. Beside the database instead, matching the intel state file.
+        """
+        if self.attack_index_path is not None:
+            return self.attack_index_path
+        return default_attack_index(self.db_path or "autosiem.db")
+
+    def _attack_matrix(self, report: UpdateReport) -> AttackMatrix | None:
+        """Refresh the ATT&CK index if asked, and report coverage against it.
+
+        Returns None when there is nothing local to use, which leaves
+        ``coverage_report`` on the matrix vendored in the package.
+        """
+        if not self.refresh_attack and self.attack_index_path is None:
+            return None
+
+        dest = self._attack_index_dest()
+        if self.refresh_attack:
+            try:
+                result = refresh_index(
+                    dest, version=self.attack_version, fetch=self.attack_fetch
+                )
+                report.attack_refreshed = result.refreshed
+                report.attack_latest = result.latest_version
+                report.messages.append(result.message)
+            except Exception as exc:  # a flaky feed must not fail the whole cycle
+                report.attack_refreshed = False
+                report.messages.append(f"attack refresh failed: {exc}")
+
+        try:
+            return load_matrix_file(dest)
+        except AttackMatrixUnavailable:
+            # Nothing refreshed yet; the vendored matrix still answers.
+            return None
 
     def _load_indicators(self, report: UpdateReport) -> list[Any]:
         """Fetch indicators from intel_url or intel_path; report failures."""
@@ -136,6 +203,9 @@ def run_update(
     intel_url: str | None = None,
     intel_path: str | Path | None = None,
     intel_state_path: str | Path | None = None,
+    attack_index_path: str | Path | None = None,
+    refresh_attack: bool = False,
+    attack_version: str | None = None,
 ) -> UpdateReport:
     """Convenience: run one update cycle and return the report."""
     return UpdateJob(
@@ -144,4 +214,7 @@ def run_update(
         intel_url=intel_url,
         intel_path=intel_path,
         intel_state_path=intel_state_path,
+        attack_index_path=attack_index_path,
+        refresh_attack=refresh_attack,
+        attack_version=attack_version,
     ).run_once()

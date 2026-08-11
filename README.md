@@ -17,7 +17,7 @@ This repository currently contains a Python MVP core rather than a full distribu
 
 - **Normalized event model** — OCSF-inspired schema so one rule detects the same attack from any source (`autosiem.normalization`).
 - **Detection engine** — JSON + Sigma-YAML rules with a rich selection-operator language, per-rule risk points, and MITRE ATT&CK tags (`autosiem.detection`, `autosiem.rules`, `autosiem.sigma`).
-- **ATT&CK coverage reporting** — see which watchlist techniques your rules cover and which are gaps (`cli coverage`).
+- **ATT&CK coverage reporting** — coverage against MITRE's full published Enterprise matrix (vendored as a distilled index, refreshable with `cli update --refresh-attack`) plus a curated high-value watchlist, with a per-tactic breakdown and detection of technique IDs MITRE no longer publishes (`cli coverage`).
 - **Entity behavioral analytics (UEBA)** — per-entity baselines scoring seven named signals: novel action, novel source IP, novel host, off-hours activity, population-wide rarity, peer-group rarity ("no other user has ever run this"), and event bursts. Baselines persist per tenant, so a restart does not relearn from zero, and every anomaly finding carries a breakdown of exactly which signals fired and why (`autosiem.anomaly`).
 - **Incident correlation** — findings are joined into one incident when they share an entity within a 24h window, transitively across entity types, so a single case spans user ↔ host ↔ IP ↔ cloud account and reads as an attack story with a time-ordered ATT&CK kill chain (`autosiem.risk`).
 - **Entity enrichment** — asset criticality, identity context (department, privileged, disabled), network/CIDR classification, and threat-intel hits, all from local files or indicators you already load. No API keys, no third-party calls. Asset and identity criticality scale finding risk, so the same detection on a crown-jewel host outranks it on a spare laptop (`autosiem.enrichment`).
@@ -82,12 +82,24 @@ The report also lists `unknown_technique_ids` — technique IDs your rules claim
 that MITRE does not currently publish, which catches typos and techniques that
 have since been revoked.
 
-Refresh the matrix after an ATT&CK release (needs network; nothing else in the
-project does):
+Refresh the matrix after an ATT&CK release. At runtime this is part of the
+update cycle, opt-in and off by default:
+
+```bash
+# Checks MITRE's release list first and downloads only if a newer version
+# exists; writes <db>.attack.json beside the database.
+PYTHONPATH=src python -m autosiem.cli update --refresh-attack --db data/autosiem.db
+```
+
+Point `AUTOSIEM_ATTACK_INDEX` at that file to use it in place of the vendored
+one. To regenerate the copy shipped inside the package instead:
 
 ```bash
 python3 scripts/build_attack_index.py
 ```
+
+Both paths run the same distillation, so they produce byte-identical output for
+the same ATT&CK release.
 
 Sigma rules work out of the box: drop a `.yaml` Sigma rule into `rules/` (see `rules/encoded_powershell.yaml`) and it is parsed and converted automatically when you run `demo` or `ingest`. To share your rules back with the Sigma ecosystem, export them:
 

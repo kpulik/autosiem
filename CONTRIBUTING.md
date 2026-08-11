@@ -58,9 +58,11 @@ python3 scripts/build_attack_index.py          # latest released version
 python3 scripts/build_attack_index.py --version 19.1   # or pin one
 ```
 
-This is the only script in the project that needs network access. Output is
-fully determined by the upstream bundle, so regenerating the same version
-produces a byte-identical file. Commit the regenerated index with the ATT&CK
+Operators do not need this script: `cli update --refresh-attack` performs the
+same refresh at runtime, writing beside the database rather than into the
+package. Both call `autosiem.attack_matrix.distill_bundle`, so they produce
+byte-identical output for the same ATT&CK release. Output is fully determined by
+the upstream bundle, with no timestamps or machine-local values. Commit the regenerated index with the ATT&CK
 version in the commit message, and re-run the suite: a tactic rename will change
 incident kill-chain summaries.
 

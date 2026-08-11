@@ -1,6 +1,6 @@
 {
  "attack_version": "19.2",
- "generated_by": "scripts/build_attack_index.py",
+ "generated_by": "autosiem.attack_matrix.distill_bundle",
  "parent_technique_count": 222,
  "revoked_or_deprecated_skipped": 161,
  "source_modified": "2026-08-05T21:33:58.496Z",

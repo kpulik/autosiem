@@ -134,7 +134,7 @@ def _matrix_coverage(covered: list[str], matrix: AttackMatrix | None = None) -> 
     }
 
 
-def coverage_report(rules: list[DetectionRule]) -> dict[str, Any]:
+def coverage_report(rules: list[DetectionRule], matrix: AttackMatrix | None = None) -> dict[str, Any]:
     """Build an ATT&CK coverage summary for a list of rules."""
     covered_techniques: list[str] = []
     for rule in rules:
@@ -161,7 +161,9 @@ def coverage_report(rules: list[DetectionRule]) -> dict[str, Any]:
         )
 
     gaps = [entry for entry in watchlist if not entry["covered"]]
-    matrix_section = _matrix_coverage(covered_techniques)
+    # An explicit matrix lets a caller report against a freshly refreshed index
+    # instead of the vendored one; None falls back to whichever is active.
+    matrix_section = _matrix_coverage(covered_techniques, matrix)
 
     # Every gap key is watchlist-scoped by name, and the baseline travels with
     # the number. A bare "gap_count: 0" reads as full ATT&CK coverage, which is
