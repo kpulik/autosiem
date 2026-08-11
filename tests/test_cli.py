@@ -104,7 +104,10 @@ def test_update_reports_rules_and_coverage(capsys, monkeypatch, tmp_path) -> Non
     out = _run_cli(capsys, monkeypatch, "update", "--rules", str(RULES_DIR), "--db", str(db))
     payload = _json(out)
     assert payload["rules_loaded"] == 16
-    assert payload["gap_count"] == 0
+    # Gaps are reported against the watchlist and alongside its size, so the
+    # zero cannot be read as full ATT&CK coverage.
+    assert payload["watchlist_gap_count"] == 0
+    assert payload["watchlist_size"] == 15
     assert payload["unique_techniques"] >= 16
     assert payload["intel_refreshed"] is False
 

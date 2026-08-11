@@ -2,9 +2,9 @@
 
 ## Current status (2026-08-08)
 
-- **563 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
+- **618 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
 - **UEBA + incident correlation deepened (2026-08-08)**: `anomaly.py` now scores seven named behavioral signals (novel action / source IP / host, off-hours, population rarity, peer-group rarity, burst) against a per-tenant baseline persisted in SQLite, with warm-up gating and a per-signal explanation on every finding; `risk.py` correlates findings through a 24h-windowed entity graph so one incident spans user ↔ host ↔ IP ↔ cloud account and carries a time-ordered kill chain.
-- **16 detection rules** covering **20 MITRE ATT&CK techniques**; the technique watchlist has **0 gaps**.
+- **16 detection rules** covering **20 MITRE ATT&CK techniques**, with **0 gaps against the 15-technique high-value watchlist** in `coverage.py`. That watchlist is a curated subset AutoSIEM maintains by hand, not MITRE's published matrix, so this is not a claim of full ATT&CK Enterprise coverage. Measuring against the real matrix is open work.
 - Demo `examples/events.jsonl` (15 events) runs a full kill-chain on profile `alice` → one critical incident (risk 1000) for which the AI runtime proposes containment (never auto-executes).
 - Sigma YAML import/export round-trip rules losslessly; the per-rule test harness + CI (suite + coverage smoke + pyright on Py 3.10/3.12) are live on the private repo `kpulik/autosiem`.
 - Phase 2 ingest surface shipped: syslog/CEF UDP listeners, 9 connectors (file/cloudtrail/okta/github/entra/sysmon/zeek/suricata/asset), per-source health, STIX/TAXII threat-intel ingestion.

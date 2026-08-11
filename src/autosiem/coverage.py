@@ -5,6 +5,11 @@ the rule set covers, plus gaps against a small watchlist of high-value
 techniques. The watchlist is a curated subset -- not the full ATT&CK matrix --
 chosen to highlight common attack paths (initial access -> execution ->
 credential access -> lateral movement -> impact).
+
+Because "0 gaps" is easy to misread as full ATT&CK coverage, the report names
+its own baseline (``baseline``) and scopes every gap key to the watchlist. Full
+ATT&CK Enterprise coverage is a different, larger measurement that this module
+does not make.
 """
 
 from __future__ import annotations
@@ -43,6 +48,19 @@ _TACTIC_MAP: dict[str, str] = {
     "T1573": "command-and-control",
     "T1105": "command-and-control",
 }
+
+#: What the gap number is measured against. This is reported alongside the
+#: number so it cannot be quoted as full-matrix coverage: "0 gaps" means "0 gaps
+#: against the list below", which AutoSIEM maintains by hand.
+BASELINE_NAME = "AutoSIEM high-value technique watchlist"
+BASELINE_KIND = "curated_subset"
+BASELINE_NOTE = (
+    "Curated subset of ATT&CK Enterprise chosen to exercise one full attack path "
+    "(initial access -> execution -> credential access -> lateral movement -> "
+    "impact). Maintained by hand in coverage.py and not synchronized with MITRE's "
+    "published matrix, so watchlist coverage is not a measure of coverage across "
+    "ATT&CK Enterprise."
+)
 
 # High-value techniques to check coverage against (technique, tactic).
 WATCHLIST: list[tuple[str, str]] = [
@@ -102,13 +120,23 @@ def coverage_report(rules: list[DetectionRule]) -> dict[str, Any]:
 
     gaps = [entry for entry in watchlist if not entry["covered"]]
 
+    # Every gap key is watchlist-scoped by name, and the baseline travels with
+    # the number. A bare "gap_count: 0" reads as full ATT&CK coverage, which is
+    # not what this measures.
     return {
+        "baseline": {
+            "name": BASELINE_NAME,
+            "kind": BASELINE_KIND,
+            "technique_count": len(WATCHLIST),
+            "note": BASELINE_NOTE,
+        },
         "total_rules": len(rules),
         "rules_with_mitre_attack": sum(1 for rule in rules if rule.mitre_attack),
         "unique_techniques": len(covered_techniques),
         "tactics_covered": tactics,
         "techniques_covered": sorted(covered_techniques),
         "watchlist_coverage": watchlist,
-        "gaps": gaps,
-        "gap_count": len(gaps),
+        "watchlist_covered_count": len(watchlist) - len(gaps),
+        "watchlist_gaps": gaps,
+        "watchlist_gap_count": len(gaps),
     }

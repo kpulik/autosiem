@@ -366,7 +366,8 @@ def main() -> None:
         _print_json({
             "rules_loaded": report.rules_loaded,
             "unique_techniques": report.coverage.get("unique_techniques", 0),
-            "gap_count": report.coverage.get("gap_count", 0),
+            "watchlist_gap_count": report.coverage.get("watchlist_gap_count", 0),
+            "watchlist_size": report.coverage.get("baseline", {}).get("technique_count", 0),
             "intel_refreshed": report.intel_refreshed,
             "messages": report.messages,
         })

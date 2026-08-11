@@ -67,6 +67,10 @@ Check MITRE ATT&CK coverage across your detection rules (which of the watchlist 
 PYTHONPATH=src python -m autosiem.cli coverage --rules rules
 ```
 
+The report measures against a curated 15-technique watchlist chosen to exercise
+one full attack path, and it names that baseline in its own output. It is not a
+measure of coverage across ATT&CK Enterprise, which is a much larger matrix.
+
 Sigma rules work out of the box: drop a `.yaml` Sigma rule into `rules/` (see `rules/encoded_powershell.yaml`) and it is parsed and converted automatically when you run `demo` or `ingest`. To share your rules back with the Sigma ecosystem, export them:
 
 ```bash
