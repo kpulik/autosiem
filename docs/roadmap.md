@@ -100,4 +100,4 @@ See `docs/deployment-and-collection.md` for how companies deploy AutoSIEM and ge
 - [x] Rule-authoring assistant with generated tests — `autosiem.rule_assistant` (`draft_rule`, `write_rule_file`, `generate_test_cases`); wired as CLI `rule-new`.
 - [x] Analyst feedback learning — `autosiem.feedback` (`FeedbackEngine` trust weights); wired into `AutoSIEMPipeline` so rejections lower a finding's effective `risk_points` before incident building.
 - [x] Approval-gated SOAR recommendations — `autosiem.soar` (`SoarPlanner.recommend`); merged into `Investigation.action_proposals` (base-technique dedup, sets `status` to `needs_approval`) in `AutoSIEMPipeline`.
-- [x] Hourly standards/threat-intel update job — `autosiem.update_job` (`UpdateJob.run_once`) wired as CLI `update`.
+- [x] Threat-intel / coverage update cycle — `autosiem.update_job` (`UpdateJob.run_once`) wired as CLI `update`: reloads local rules, recomputes ATT&CK coverage, and refreshes STIX intel from a configured URL or path. Not hourly by itself — the `schedule()` daemon is a library API nothing starts, so run it from cron. Rules are never fetched over the network; automatic rule updates are open work.
