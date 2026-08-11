@@ -47,6 +47,23 @@ the pattern: construct in an `available=False` state, raise a helpful
 CI (`.github/workflows/ci.yml`) runs all three on Python 3.10 and 3.12. All
 three must pass.
 
+## Refreshing the ATT&CK matrix
+
+Coverage is measured against a distilled copy of MITRE's published ATT&CK
+Enterprise bundle, vendored at `src/autosiem/attack_enterprise_index.json` so
+the report works offline. After an ATT&CK release:
+
+```bash
+python3 scripts/build_attack_index.py          # latest released version
+python3 scripts/build_attack_index.py --version 19.1   # or pin one
+```
+
+This is the only script in the project that needs network access. Output is
+fully determined by the upstream bundle, so regenerating the same version
+produces a byte-identical file. Commit the regenerated index with the ATT&CK
+version in the commit message, and re-run the suite: a tactic rename will change
+incident kill-chain summaries.
+
 ## Adding a detection rule
 
 New rules ship tested or the suite fails — `tests/test_rules.py` asserts that
@@ -56,7 +73,9 @@ every rule in `rules/` has at least one positive and one negative case.
    the schema and `rules/failed_login.json` for a minimal example.
 2. Add positive + negative cases to `tests/test_rules.py`.
 3. Run `PYTHONPATH=src python3 -m autosiem.cli coverage --rules rules` and
-   confirm the technique count moved as you expect.
+   confirm the technique count moved as you expect. Check
+   `matrix.unknown_technique_ids` is empty — a technique ID MITRE does not
+   publish is a typo or a revoked technique, and the suite fails on it.
 
 Rule JSON files may begin with `//` or `#` comment lines — the loader strips
 them. Your editor will flag those as JSON syntax errors; that is expected, do

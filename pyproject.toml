@@ -20,3 +20,8 @@ autosiem = "autosiem.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# The distilled ATT&CK Enterprise index. Without this the matrix is missing from
+# an installed wheel and `cli coverage` cannot report matrix coverage.
+autosiem = ["attack_enterprise_index.json"]

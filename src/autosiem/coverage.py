@@ -16,38 +16,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from .attack_matrix import AttackMatrix, AttackMatrixUnavailable, load_matrix
 from .schemas import DetectionRule
-
-# Base technique ID -> primary tactic. Sub-techniques inherit their base's
-# tactic unless listed explicitly below.
-_TACTIC_MAP: dict[str, str] = {
-    "T1059": "execution",
-    "T1047": "execution",
-    "T1543": "persistence",
-    "T1566": "initial-access",
-    "T1078": "initial-access",
-    "T1190": "initial-access",
-    "T1110": "credential-access",
-    "T1003": "credential-access",
-    "T1552": "credential-access",
-    "T1027": "defense-evasion",
-    "T1070": "defense-evasion",
-    "T1036": "defense-evasion",
-    "T1218": "defense-evasion",
-    "T1562": "defense-evasion",
-    "T1082": "discovery",
-    "T1482": "discovery",
-    "T1018": "discovery",
-    "T1087": "discovery",
-    "T1021": "lateral-movement",
-    "T1041": "exfiltration",
-    "T1048": "exfiltration",
-    "T1486": "impact",
-    "T1498": "impact",
-    "T1071": "command-and-control",
-    "T1573": "command-and-control",
-    "T1105": "command-and-control",
-}
 
 #: What the gap number is measured against. This is reported alongside the
 #: number so it cannot be quoted as full-matrix coverage: "0 gaps" means "0 gaps
@@ -88,8 +58,80 @@ def _base_technique(technique: str) -> str:
 
 
 def tactic_for(technique: str) -> str | None:
-    """Return the primary tactic for an ATT&CK technique ID."""
-    return _TACTIC_MAP.get(_base_technique(technique))
+    """Primary tactic for an ATT&CK technique ID, per the published matrix.
+
+    Reads MITRE's own classification rather than a local table, so tactic
+    renames arrive with the next index regeneration instead of silently
+    persisting. Returns None for a technique MITRE does not currently publish.
+    """
+    try:
+        matrix = load_matrix()
+    except AttackMatrixUnavailable:
+        return None
+    tactics = matrix.tactics_for(technique)
+    return tactics[0] if tactics else None
+
+
+def _percent(part: int, whole: int) -> float:
+    return round(100.0 * part / whole, 1) if whole else 0.0
+
+
+def _matrix_coverage(covered: list[str], matrix: AttackMatrix | None = None) -> dict[str, Any]:
+    """Coverage against MITRE's published Enterprise matrix.
+
+    Reported at two granularities because they answer different questions and
+    one alone is misleading. Technique-level counts every published technique
+    including sub-techniques, which is the strictest denominator. Parent-level
+    credits a parent when the parent or any of its sub-techniques is detected,
+    which is how an ATT&CK Navigator layer usually reads. Both percentages ship
+    with their numerator and denominator so neither can be quoted bare.
+
+    ``unknown_technique_ids`` lists technique IDs the rules claim that MITRE
+    does not currently publish -- typos, or techniques since revoked.
+    """
+    if matrix is None:
+        try:
+            matrix = load_matrix()
+        except AttackMatrixUnavailable as exc:
+            return {"available": False, "error": str(exc)}
+
+    known = {identifier for identifier in covered if identifier in matrix}
+    unknown = sorted(identifier for identifier in covered if identifier not in matrix)
+
+    all_parents = matrix.parent_ids()
+    covered_parents = {
+        technique.parent_id
+        for identifier in known
+        if (technique := matrix.get(identifier)) is not None
+    } & all_parents
+
+    by_tactic: list[dict[str, Any]] = []
+    for tactic in matrix.tactics:
+        in_tactic = matrix.techniques_in_tactic(tactic)
+        hit = in_tactic & known
+        by_tactic.append(
+            {
+                "tactic": tactic,
+                "techniques": len(in_tactic),
+                "covered": len(hit),
+                "percent": _percent(len(hit), len(in_tactic)),
+            }
+        )
+
+    return {
+        "available": True,
+        "attack_version": matrix.attack_version,
+        "source_url": matrix.source_url,
+        "source_modified": matrix.source_modified,
+        "technique_total": len(matrix),
+        "technique_covered": len(known),
+        "technique_percent": _percent(len(known), len(matrix)),
+        "parent_total": len(all_parents),
+        "parent_covered": len(covered_parents),
+        "parent_percent": _percent(len(covered_parents), len(all_parents)),
+        "unknown_technique_ids": unknown,
+        "by_tactic": by_tactic,
+    }
 
 
 def coverage_report(rules: list[DetectionRule]) -> dict[str, Any]:
@@ -119,6 +161,7 @@ def coverage_report(rules: list[DetectionRule]) -> dict[str, Any]:
         )
 
     gaps = [entry for entry in watchlist if not entry["covered"]]
+    matrix_section = _matrix_coverage(covered_techniques)
 
     # Every gap key is watchlist-scoped by name, and the baseline travels with
     # the number. A bare "gap_count: 0" reads as full ATT&CK coverage, which is
@@ -130,6 +173,7 @@ def coverage_report(rules: list[DetectionRule]) -> dict[str, Any]:
             "technique_count": len(WATCHLIST),
             "note": BASELINE_NOTE,
         },
+        "matrix": matrix_section,
         "total_rules": len(rules),
         "rules_with_mitre_attack": sum(1 for rule in rules if rule.mitre_attack),
         "unique_techniques": len(covered_techniques),

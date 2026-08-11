@@ -103,7 +103,8 @@ For how companies deploy AutoSIEM and get data into it (agents, agentless connec
 | `rules.py` | JSON + Sigma-YAML rule loading with safe leading-comment stripping; `apply_rule_state()` overlays persisted enable/disable |
 | `sigma.py` | zero-dependency Sigma YAML subset parser, rule conversion, and Sigma export |
 | `detection.py` | rule matching and finding creation |
-| `coverage.py` | MITRE ATT&CK coverage report and technique watchlist |
+| `coverage.py` | Coverage against the full ATT&CK matrix (via `attack_matrix.py`) + the curated technique watchlist |
+| `attack_matrix.py` | Vendored ATT&CK Enterprise index (technique -> name + tactics); regenerate with `scripts/build_attack_index.py` |
 | `anomaly.py` | entity behavioral analytics (UEBA): novel-action/IP/host, off-hours, population rarity, peer-group rarity, and burst signals against a per-tenant baseline persisted in SQLite |
 | `risk.py` | entity risk aggregation + time-windowed entity-graph incident correlation |
 | `enrichment.py` | asset inventory, identity directory, network/CIDR classification and threat-intel context; criticality scales finding risk |

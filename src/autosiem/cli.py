@@ -368,6 +368,8 @@ def main() -> None:
             "unique_techniques": report.coverage.get("unique_techniques", 0),
             "watchlist_gap_count": report.coverage.get("watchlist_gap_count", 0),
             "watchlist_size": report.coverage.get("baseline", {}).get("technique_count", 0),
+            "attack_version": report.coverage.get("matrix", {}).get("attack_version"),
+            "matrix_technique_percent": report.coverage.get("matrix", {}).get("technique_percent"),
             "intel_refreshed": report.intel_refreshed,
             "messages": report.messages,
         })

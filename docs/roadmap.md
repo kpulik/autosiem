@@ -4,7 +4,7 @@
 
 - **618 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
 - **UEBA + incident correlation deepened (2026-08-08)**: `anomaly.py` now scores seven named behavioral signals (novel action / source IP / host, off-hours, population rarity, peer-group rarity, burst) against a per-tenant baseline persisted in SQLite, with warm-up gating and a per-signal explanation on every finding; `risk.py` correlates findings through a 24h-windowed entity graph so one incident spans user ↔ host ↔ IP ↔ cloud account and carries a time-ordered kill chain.
-- **16 detection rules** covering **20 MITRE ATT&CK techniques**, with **0 gaps against the 15-technique high-value watchlist** in `coverage.py`. That watchlist is a curated subset AutoSIEM maintains by hand, not MITRE's published matrix, so this is not a claim of full ATT&CK Enterprise coverage. Measuring against the real matrix is open work.
+- **16 detection rules** covering **20 MITRE ATT&CK techniques**. Measured against MITRE's published matrix (ATT&CK **19.2**, vendored as a distilled index): **20/697 techniques (2.9%)** and **15/222 parent techniques (6.8%)**, with a per-tactic breakdown and zero technique IDs that MITRE no longer publishes. The separate 15-technique curated watchlist is fully covered. The small percentage is the honest one — this is a demonstration rule set, not a production content library.
 - Demo `examples/events.jsonl` (15 events) runs a full kill-chain on profile `alice` → one critical incident (risk 1000) for which the AI runtime proposes containment (never auto-executes).
 - Sigma YAML import/export round-trip rules losslessly; the per-rule test harness + CI (suite + coverage smoke + pyright on Py 3.10/3.12) are live on the private repo `kpulik/autosiem`.
 - Phase 2 ingest surface shipped: syslog/CEF UDP listeners, 9 connectors (file/cloudtrail/okta/github/entra/sysmon/zeek/suricata/asset), per-source health, STIX/TAXII threat-intel ingestion.
@@ -36,7 +36,7 @@
 - [x] Suppression/exception framework (manual suppressions + auto-repeat, stored and applied at ingest)
 - [x] Incident triage workflow (status/assignee/resolution + comment thread)
 - [x] Generic OpenAI-compatible LLM config (URL + optional API key + context window/sampling limits; URL alone infers backend)
-- [x] ATT&CK coverage matrix (CLI `coverage` report + technique watchlist)
+- [x] ATT&CK coverage matrix (CLI `coverage` report: full-matrix coverage from MITRE's published bundle, per-tactic breakdown, invalid-technique detection, plus the curated watchlist)
 - [x] Sigma import (YAML subset, auto-converted at load; see `rules/encoded_powershell.yaml`)
 - [x] Sigma rule export (`autosiem.cli export` writes `<rule_id>.yaml` per rule)
 - [x] Rule tests and CI (per-rule positive/negative harness in `tests/test_rules.py` — every rule in `rules/` must have cases or the suite fails; GitHub Actions workflow in `.github/workflows/ci.yml` runs the suite + coverage smoke + pyright on Python 3.10/3.12 — live on the private GitHub repo `kpulik/autosiem`)

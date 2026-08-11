@@ -67,9 +67,27 @@ Check MITRE ATT&CK coverage across your detection rules (which of the watchlist 
 PYTHONPATH=src python -m autosiem.cli coverage --rules rules
 ```
 
-The report measures against a curated 15-technique watchlist chosen to exercise
-one full attack path, and it names that baseline in its own output. It is not a
-measure of coverage across ATT&CK Enterprise, which is a much larger matrix.
+The report measures two things and names both:
+
+- **The full ATT&CK Enterprise matrix**, from MITRE's published STIX bundle
+  distilled into `src/autosiem/attack_enterprise_index.json`. The shipped rule
+  set covers **20 of 697 techniques (2.9%)** and **15 of 222 parent techniques
+  (6.8%)** on ATT&CK 19.2, broken down per tactic. That is what a 16-rule
+  demonstration rule set covers; it is not a production content library.
+- **A curated 15-technique watchlist** chosen to exercise one full attack path
+  (initial access → execution → credential access → lateral movement → impact),
+  which the shipped rules cover completely.
+
+The report also lists `unknown_technique_ids` — technique IDs your rules claim
+that MITRE does not currently publish, which catches typos and techniques that
+have since been revoked.
+
+Refresh the matrix after an ATT&CK release (needs network; nothing else in the
+project does):
+
+```bash
+python3 scripts/build_attack_index.py
+```
 
 Sigma rules work out of the box: drop a `.yaml` Sigma rule into `rules/` (see `rules/encoded_powershell.yaml`) and it is parsed and converted automatically when you run `demo` or `ingest`. To share your rules back with the Sigma ecosystem, export them:
 

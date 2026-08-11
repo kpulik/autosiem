@@ -105,3 +105,61 @@ def test_full_watchlist_coverage_is_not_claimed_as_matrix_coverage() -> None:
     # Nothing in the report asserts full-matrix coverage.
     assert report["baseline"]["kind"] == "curated_subset"
     assert "coverage_percent" not in report
+
+
+def test_matrix_section_reports_against_the_published_matrix() -> None:
+    report = coverage_report([_rule("A", ["T1059.001", "T1486"])])
+    matrix = report["matrix"]
+    assert matrix["available"] is True
+    assert matrix["attack_version"]
+    assert matrix["technique_total"] > 400
+    assert matrix["technique_covered"] == 2
+    assert matrix["parent_covered"] == 2  # T1059 via its sub-technique, plus T1486
+
+
+def test_matrix_percentages_match_their_own_counts() -> None:
+    """Every percentage ships with the numerator and denominator behind it."""
+    report = coverage_report([_rule("A", ["T1059", "T1003"])])
+    matrix = report["matrix"]
+    assert matrix["technique_percent"] == round(
+        100.0 * matrix["technique_covered"] / matrix["technique_total"], 1
+    )
+    assert matrix["parent_percent"] == round(
+        100.0 * matrix["parent_covered"] / matrix["parent_total"], 1
+    )
+    for entry in matrix["by_tactic"]:
+        expected = round(100.0 * entry["covered"] / entry["techniques"], 1) if entry["techniques"] else 0.0
+        assert entry["percent"] == expected, entry
+
+
+def test_matrix_flags_technique_ids_mitre_does_not_publish() -> None:
+    """A typo'd or revoked technique tag is a real detection-content defect."""
+    report = coverage_report([_rule("A", ["T1059", "T9999"])])
+    assert report["matrix"]["unknown_technique_ids"] == ["T9999"]
+    assert report["matrix"]["technique_covered"] == 1
+
+
+def test_shipped_rules_reference_only_published_techniques() -> None:
+    """Guards the rule set itself against drifting off the matrix."""
+    from pathlib import Path
+
+    from autosiem.rules import load_rules
+
+    rules = load_rules(Path(__file__).resolve().parents[1] / "rules")
+    report = coverage_report(rules)
+    assert report["matrix"]["unknown_technique_ids"] == []
+
+
+def test_matrix_coverage_degrades_visibly_when_the_index_is_missing(monkeypatch) -> None:
+    """No index means "unavailable", never a silent 0%."""
+    from autosiem import coverage as coverage_module
+    from autosiem.attack_matrix import AttackMatrixUnavailable
+
+    def _boom() -> None:
+        raise AttackMatrixUnavailable("index gone")
+
+    monkeypatch.setattr(coverage_module, "load_matrix", _boom)
+    report = coverage_report([_rule("A", ["T1059"])])
+    assert report["matrix"] == {"available": False, "error": "index gone"}
+    # The watchlist half of the report still works.
+    assert report["watchlist_gap_count"] == len(WATCHLIST) - 1
