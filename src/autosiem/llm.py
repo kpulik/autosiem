@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .ai import Investigator
+from .net import InsecureURLError, require_https
 from .redaction import Redactor
 from .schemas import Finding, Incident
 from .soc_runtime import DecisionType
@@ -148,17 +149,35 @@ class OllamaBackend(LLMBackend):
         return data.get("message", {}).get("content", "")
 
 
+def _checked_base_url(config: LLMConfig, default: str) -> str:
+    """Validate the endpoint before any prompt is built for it.
+
+    Prompts carry incident detail, so a plaintext *remote* endpoint would put
+    that on the wire in the clear. Loopback is allowed because a local model
+    server never leaves the machine and is the documented default. Checked here
+    rather than per-request so a misconfiguration fails at startup instead of
+    silently falling back to the deterministic investigator on every incident
+    (SEC-017).
+    """
+    url = config.base_url or default
+    try:
+        return require_https(url, allow_loopback=True, what="LLM prompts to")
+    except InsecureURLError as exc:
+        raise LLMError(str(exc)) from exc
+
+
 def make_backend(config: LLMConfig) -> LLMBackend | None:
     if config.backend == "none":
         return None
     if config.backend == "openai":
-        config.base_url = config.base_url or "https://api.openai.com/v1"
+        config.base_url = _checked_base_url(config, "https://api.openai.com/v1")
         return OpenAIBackend(config)
     if config.backend in {"ollama", "openai_compat"}:
         if config.backend == "ollama":
+            config.base_url = _checked_base_url(config, "http://localhost:11434")
             return OllamaBackend(config)
         # openai_compat: default to LM Studio's local OpenAI-compatible endpoint.
-        config.base_url = config.base_url or "http://localhost:1234/v1"
+        config.base_url = _checked_base_url(config, "http://localhost:1234/v1")
         return OpenAIBackend(config)
     raise LLMError(f"Unknown LLM backend '{config.backend}'")
 

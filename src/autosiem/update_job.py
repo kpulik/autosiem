@@ -27,6 +27,7 @@ from .attack_matrix import (
     refresh_index,
 )
 from .coverage import coverage_report
+from .net import require_https
 from .rules import load_rules
 from .threat_intel import (
     default_intel_state,
@@ -149,7 +150,10 @@ class UpdateJob:
         """Fetch indicators from intel_url or intel_path; report failures."""
         if self.intel_url is not None:
             try:
-                with urllib.request.urlopen(self.intel_url, timeout=INTEL_FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310 (network is the point of this job)
+                # Indicators are bare match strings with no signature, so the
+                # transport is the only integrity check there is (SEC-017).
+                url = require_https(self.intel_url, what="threat intel")
+                with urllib.request.urlopen(url, timeout=INTEL_FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310 (network is the point of this job)
                     data = json.loads(response.read().decode("utf-8"))
                 return parse_stix_bundle(data)
             except Exception as exc:  # network/json failures must not kill the job

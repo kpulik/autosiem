@@ -788,7 +788,10 @@ def _investigation_summary(result: PipelineResult, incident_id: str) -> dict[str
         "status": investigation.status,
         "decision": investigation.decision.decision_type.value,
         "confidence": round(investigation.decision.confidence, 2),
-        "used_llm": any(entry.startswith("decision_from_llm") for entry in investigation.audit_log),
+        # Recorded by the pipeline from the call itself, not inferred from the
+        # audit log: never claim an LLM was used unless one answered.
+        "used_llm": incident_id in result.llm_reports,
+        "confidence_source": investigation.decision.confidence_source,
         "proposed_actions": [
             {
                 "proposal_id": proposal.proposal_id,

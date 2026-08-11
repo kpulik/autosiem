@@ -703,6 +703,40 @@ def index(request: Request, query: str | None = None, entity: str | None = None)
     )
 
 
+def _confidence_source(investigation: dict[str, Any]) -> str:
+    """Where the decision's confidence came from, per the stored investigation."""
+    decision = (investigation.get("data") or {}).get("decision") or {}
+    return str(decision.get("confidence_source") or "deterministic")
+
+
+def _provenance_badge(investigation: dict[str, Any]) -> str:
+    """Say plainly whether a language model produced this decision.
+
+    Without this the page shows a confidence number with no indication of who
+    asserted it, which is the first thing a reviewer asks about an "AI analyst".
+    """
+    if not investigation:
+        return ""
+    if _confidence_source(investigation) == "model":
+        return '<span class="prov prov-model" title="A language model produced this decision">LLM-assisted</span>'
+    return '<span class="prov prov-local" title="Derived by AutoSIEM from the evidence; no model involved">Deterministic</span>'
+
+
+def _provenance_note(investigation: dict[str, Any]) -> str:
+    if not investigation:
+        return ""
+    if _confidence_source(investigation) == "model":
+        return (
+            "Decision and confidence were reported by a language model. A model-reported "
+            "score cannot authorize autonomous response: high-risk actions stay "
+            "approval-gated regardless of the number."
+        )
+    return (
+        "Decision and confidence were derived by AutoSIEM from the evidence. "
+        "No language model was involved."
+    )
+
+
 @app.get("/incidents/{incident_id}", response_class=HTMLResponse)
 def incident_detail(request: Request, incident_id: str) -> str:
     bundle = get_store().get_incident_bundle(incident_id, tenant_id=_tenant(request))
@@ -729,7 +763,8 @@ def incident_detail(request: Request, incident_id: str) -> str:
           <p>{_esc(data.get('summary', 'No summary available.'))}</p>
           <div class="chips">{''.join(f'<span>{_esc(entity)}</span>' for entity in data.get('entities', []))}</div>
           <h2>AI analyst decision</h2>
-          <p><strong>{_esc(investigation.get('decision', 'none'))}</strong> confidence {_esc(round(float(investigation.get('confidence', 0)), 2))}</p>
+          <p><strong>{_esc(investigation.get('decision', 'none'))}</strong> confidence {_esc(round(float(investigation.get('confidence', 0)), 2))} {_provenance_badge(investigation)}</p>
+          <p class="provenance-note">{_provenance_note(investigation)}</p>
         </section>
         <section class="panel">
           <h2>Triage</h2>
@@ -1073,6 +1108,10 @@ def _page(title: str, body: str) -> str:
     .sups-form {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; margin:14px 0; }}
     .sups-form button {{ grid-column:1 / -1; }}
     .chiprow {{ display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }}
+    .prov {{ display:inline-block; margin-left:8px; padding:3px 9px; border-radius:999px; font-size:12px; font-weight:700; letter-spacing:.04em; vertical-align:middle; }}
+    .prov-local {{ background:#17324a; color:#8fd0ff; border:1px solid #2b587d; }}
+    .prov-model {{ background:#3d2f14; color:#ffcf7a; border:1px solid #6d5220; }}
+    .provenance-note {{ color:#93a4bf; font-size:13px; margin-top:6px; max-width:70ch; }}
     .chipbtn {{ background:#23324c; color:#cfe0ff; }}
     .chipbtn.active {{ background:linear-gradient(135deg,#38bdf8,#818cf8); color:white; }}
     .comment {{ padding:12px 0; border-top:1px solid rgba(255,255,255,.08); }}

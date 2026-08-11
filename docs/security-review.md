@@ -245,7 +245,7 @@ surface.
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
 | SEC-015 | Low | `/health` leaks db/rules paths | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
 | SEC-016 | Low | Deep/oversized JSON → 500/memory; plaintext at rest + umask perms | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
-| SEC-017 | Low | Intel refresh allows plaintext fetch, no integrity/SSRF guard | `update_job.py:_load_indicators` L81-99 | Enforce `https://`; sign/pin feed; SSRF guard |
+| SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
 | Verified clean | — | Search DSL → parameterized SQL (no injection) | `storage.py` L321-393 | Keep `?`-only binding; review rule for future SQL |
 
 ---
@@ -434,3 +434,38 @@ with diminishing returns, and is capped at `MAX_PLAN_CONFIDENCE` (0.90), which
 sits below `minimum_confidence_for_policy_bounded_response` by construction.
 Matching a runbook is therefore never on its own sufficient to open the
 autonomous gate, whatever the alert volume.
+
+## SEC-017 — Plaintext fetch for threat intel and LLM prompts (transport fixed 2026-08-10)
+
+**Severity:** Low. **Status:** Transport half fixed; integrity half still open.
+
+`--intel-url` fetched a STIX bundle over whatever scheme was given, including
+plain `http://`. Indicators are bare match strings with no signature, so the
+transport was the only integrity check there was, and a tampered bundle yields
+fabricated findings or silent false negatives. The same recommendation covered
+`AUTOSIEM_LLM_URL`, where prompts carrying incident detail would go out in
+cleartext to a remote endpoint.
+
+**Fix:** `net.require_https` states the rule once and every remote fetch routes
+through it: threat intel (`update_job._load_indicators`), the ATT&CK index and
+bundle (`attack_matrix`), and the LLM endpoint (`llm.make_backend`).
+
+Loopback is exempt only where a caller opts in, which is the LLM path alone: a
+model server on `http://localhost:1234/v1` never leaves the machine and is the
+documented default for LM Studio and Ollama. A hostname that merely begins with
+`localhost` or `127` is treated as remote, and there are tests for that.
+
+The LLM endpoint is validated when the backend is constructed rather than per
+request, so a cleartext remote endpoint fails at startup instead of silently
+falling back to the deterministic investigator on every incident and hiding the
+misconfiguration. Intel and ATT&CK failures still degrade with the reason in the
+report rather than failing the cycle.
+
+**Still open:** no signature or pinning on either feed, and no SSRF allow-list.
+HTTPS raises the bar to a CA-trust compromise; it does not make a fetched feed
+trustworthy. Both remain worth doing before any auto-refresh runs unattended in
+production. `connectors.py` (Okta API) and `backends.py` (ClickHouse/OpenSearch)
+are deliberately not covered: the first already targets an HTTPS SaaS endpoint,
+and the second commonly runs on plaintext inside a trusted network.
+
+Covered by `tests/test_net_policy.py` (20 tests).

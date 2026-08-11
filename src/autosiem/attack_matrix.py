@@ -28,6 +28,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
+from .net import require_https
+
 #: The index that ships inside the package. Treated as read-only: a refresh
 #: writes elsewhere, so an installed wheel never diverges from what was built
 #: and read-only installs keep working.
@@ -184,12 +186,10 @@ def _require_https(url: str) -> str:
     """Reject plaintext fetches.
 
     The index decides which techniques exist and what they are called; a
-    tampered one silently rewrites coverage. SEC-017 records the same class of
-    problem for the threat-intel feed, which still accepts plain http.
+    tampered one silently rewrites every coverage figure. Shared policy lives in
+    ``net.require_https`` so intel and LLM traffic answer to the same rule.
     """
-    if not url.lower().startswith("https://"):
-        raise ValueError(f"refusing to fetch ATT&CK data over a non-HTTPS URL: {url}")
-    return url
+    return require_https(url, what="ATT&CK data")
 
 
 def _default_fetch(url: str) -> bytes:

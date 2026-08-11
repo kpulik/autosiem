@@ -43,6 +43,10 @@ class PipelineResult:
     reports: dict[str, str] = field(default_factory=dict)
     investigations: dict[str, Investigation] = field(default_factory=dict)
     suppressed: list[dict[str, Any]] = field(default_factory=list)
+    #: Incident IDs whose report actually came from a language model. Recorded
+    #: from the call itself rather than inferred from the audit log, so a
+    #: configured-but-failing backend is never reported as "used an LLM".
+    llm_reports: set[str] = field(default_factory=set)
 
 
 class AutoSIEMPipeline:
@@ -144,6 +148,10 @@ class AutoSIEMPipeline:
                 annotation = self.llm.annotate(incident, related, extra_context=rag_context)
                 report = annotation.report
                 decision_override = annotation.decision
+                # A backend being configured is not evidence one was used: the
+                # call can fail and fall back to the local investigator.
+                if annotation.used_llm:
+                    result.llm_reports.add(incident.incident_id)
             else:
                 report = self.investigator.explain(incident, result.findings)
                 if rag_context:

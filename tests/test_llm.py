@@ -176,3 +176,60 @@ def test_fit_context_no_window_is_passthrough() -> None:
     s, u = service._fit_context(system, user, incident, findings)
     assert s == system
     assert u == user
+
+def test_used_llm_is_recorded_not_inferred() -> None:
+    """A configured-but-failing backend must not be reported as 'used an LLM'.
+
+    The old CLI derived this by string-matching 'decision_from_llm' in the audit
+    log, which is a proxy for the fact rather than the fact.
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from autosiem.llm import LLMBackend, LLMConfig, LLMError, LLMService
+    from autosiem.pipeline import AutoSIEMPipeline
+    from autosiem.rules import load_rules
+
+    root = _Path(__file__).resolve().parents[1]
+    lines = (root / "examples" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    rules = load_rules(root / "rules")
+
+    class _Working(LLMBackend):
+        def chat(self, system: str, user: str) -> str:
+            return _json.dumps(
+                {
+                    "decision_type": "escalate",
+                    "confidence": 0.4,
+                    "rationale": "stub",
+                    "recommended_owner": "tier-2-analyst",
+                    "summary": "stub report",
+                }
+            )
+
+    class _Broken(LLMBackend):
+        def chat(self, system: str, user: str) -> str:
+            raise LLMError("backend down")
+
+    working = LLMService(config=LLMConfig())
+    working.backend = _Working(working.config)
+    result = AutoSIEMPipeline(rules, llm=working).process_lines(lines)
+    assert result.llm_reports == {incident.incident_id for incident in result.incidents}
+
+    broken = LLMService(config=LLMConfig())
+    broken.backend = _Broken(broken.config)
+    fallback = AutoSIEMPipeline(rules, llm=broken).process_lines(lines)
+    # Backend configured and enabled, but it never answered.
+    assert broken.enabled is True
+    assert fallback.llm_reports == set()
+
+
+def test_no_llm_configured_records_no_llm_reports() -> None:
+    from pathlib import Path as _Path
+
+    from autosiem.pipeline import AutoSIEMPipeline
+    from autosiem.rules import load_rules
+
+    root = _Path(__file__).resolve().parents[1]
+    lines = (root / "examples" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    result = AutoSIEMPipeline(load_rules(root / "rules")).process_lines(lines)
+    assert result.llm_reports == set()

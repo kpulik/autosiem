@@ -185,3 +185,61 @@ def test_configured_csrf_secret_is_read_at_call_time(monkeypatch) -> None:
 def test_csrf_token_is_not_empty_without_configuration(monkeypatch) -> None:
     monkeypatch.delenv("AUTOSIEM_CSRF_SECRET", raising=False)
     assert len(_csrf_token(TOGGLE_PATH)) == 32
+
+
+def _seed_incident_with_source(tmp_path, source: str):
+    """Persist a demo incident whose decision has the given confidence_source."""
+    import json as _json
+    from pathlib import Path as _Path
+
+    from autosiem.llm import LLMBackend, LLMConfig, LLMService
+    from autosiem.pipeline import AutoSIEMPipeline
+    from autosiem.rules import load_rules
+    from autosiem.storage import AutoSIEMStorage
+
+    root = _Path(__file__).resolve().parents[1]
+    lines = (root / "examples" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+
+    llm = None
+    if source == "model":
+        class _Stub(LLMBackend):
+            def chat(self, system: str, user: str) -> str:
+                return _json.dumps(
+                    {
+                        "decision_type": "containment_proposed",
+                        "confidence": 0.91,
+                        "rationale": "stub",
+                        "recommended_owner": "tier-2-incident-responder",
+                        "summary": "stub report",
+                    }
+                )
+
+        llm = LLMService(config=LLMConfig())
+        llm.backend = _Stub(llm.config)
+
+    db = tmp_path / f"{source}.db"
+    result = AutoSIEMPipeline(load_rules(root / "rules"), llm=llm).process_lines(lines)
+    store = AutoSIEMStorage(db)
+    store.save_pipeline_result(result)
+    return db, result.incidents[0].incident_id
+
+
+def test_incident_page_labels_a_deterministic_decision(tmp_path, monkeypatch):
+    db, incident_id = _seed_incident_with_source(tmp_path, "deterministic")
+    monkeypatch.setenv("AUTOSIEM_DB", str(db))
+    monkeypatch.setenv("AUTOSIEM_AUTH_INSECURE", "1")
+    page = TestClient(app).get(f"/incidents/{incident_id}").text
+    assert "Deterministic" in page
+    assert "No language model was involved" in page
+    assert "LLM-assisted" not in page
+
+
+def test_incident_page_labels_a_model_sourced_decision(tmp_path, monkeypatch):
+    """The case that matters: a reviewer must be able to see a model decided."""
+    db, incident_id = _seed_incident_with_source(tmp_path, "model")
+    monkeypatch.setenv("AUTOSIEM_DB", str(db))
+    monkeypatch.setenv("AUTOSIEM_AUTH_INSECURE", "1")
+    page = TestClient(app).get(f"/incidents/{incident_id}").text
+    assert "LLM-assisted" in page
+    assert "reported by a language model" in page
+    assert "cannot authorize autonomous response" in page
