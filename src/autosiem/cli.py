@@ -21,6 +21,7 @@ from .rule_assistant import RuleAssistant
 from .rules import apply_rule_state, load_rules
 from .schemas import DetectionRule
 from .sigma import export_rules
+from .sigma_sync import DEFAULT_RULESET, RULESETS, default_sigma_dir, load_synced_rules, merge_rules, sync_rules
 from .connectors import registry
 from .listeners import SyslogServer
 from .soar import SoarPlanner
@@ -232,6 +233,12 @@ def main() -> None:
     update.add_argument("--kev-file", help="Where the KEV cache lives (default: <db>.kev.json)")
     _add_db_arg(update)
 
+    sigma_sync = sub.add_parser("sigma-sync", help="Sync runnable detection rules from the SigmaHQ community ruleset")
+    _add_db_arg(sigma_sync)
+    sigma_sync.add_argument("--ruleset", default=DEFAULT_RULESET, choices=list(RULESETS), help="Which published SigmaHQ bundle to pull")
+    sigma_sync.add_argument("--dest", help="Where synced rules are written (default: <db>.sigma/)")
+    sigma_sync.add_argument("--limit", type=int, help="Cap how many rules are written (the report still counts them all)")
+
     metrics = sub.add_parser("metrics", help="Export Prometheus-format metrics")
     _add_db_arg(metrics)
 
@@ -338,7 +345,7 @@ def main() -> None:
         comment = store.add_incident_comment(args.id, args.actor, args.body)
         _print_json(comment or {"error": "incident_not_found", "incident_id": args.id})
     elif args.command == "coverage":
-        _print_json(coverage_report(load_rules(args.rules)))
+        _print_json(coverage_report(_all_rules(args.rules)))
     elif args.command == "rules":
         if args.enable:
             _print_json(store.set_rule_enabled(args.enable, True, actor="cli"))
@@ -402,6 +409,22 @@ def main() -> None:
             "matrix_technique_percent": report.coverage.get("matrix", {}).get("technique_percent"),
             "intel_refreshed": report.intel_refreshed,
             "messages": report.messages,
+        })
+    elif args.command == "sigma-sync":
+        dest = args.dest or default_sigma_dir(args.db)
+        report = sync_rules(dest, ruleset=args.ruleset, limit=args.limit)
+        _print_json({
+            "release": report.release,
+            "ruleset": report.ruleset,
+            "candidates": report.candidates,
+            "imported": report.imported,
+            "not_applicable": report.not_applicable,
+            "unsupported_syntax": report.unsupported_syntax,
+            "techniques": len(report.techniques),
+            "missing_fields": report.missing_fields,
+            "destination": report.destination,
+            "summary": report.summary(),
+            "next_step": f"export AUTOSIEM_SIGMA_DIR={report.destination}",
         })
     elif args.command == "metrics":
         # Local MetricsRegistry — do NOT shadow the module-level connectors `registry`
@@ -592,9 +615,30 @@ def _make_threat_intel(args: argparse.Namespace) -> ThreatIntelMatcher | None:
     return ThreatIntelMatcher(indicators) if indicators else None
 
 
+def _all_rules(rules_dir: str | Path) -> list[DetectionRule]:
+    """Curated rules plus any synced from SigmaHQ.
+
+    Curated rules win on a rule_id collision, so third-party content never
+    silently replaces one this project authored and tested. Load failures in
+    synced content are printed rather than swallowed: a broken sync must not
+    look like a small one.
+    """
+    rules = load_rules(rules_dir)
+    sigma_dir = os.environ.get("AUTOSIEM_SIGMA_DIR")
+    if not sigma_dir:
+        return rules
+    errors: list[str] = []
+    synced = load_synced_rules(sigma_dir, errors=errors)
+    for problem in errors[:5]:
+        print(f"warning: skipped synced rule {problem}")
+    if len(errors) > 5:
+        print(f"warning: {len(errors) - 5} further synced rules could not be loaded")
+    return merge_rules(rules, synced)
+
+
 def _rules_with_state(rules_dir: str | Path, state: dict[str, bool]) -> list[DetectionRule]:
     """Load rules fresh and overlay any persisted enable/disable overrides."""
-    rules = load_rules(rules_dir)
+    rules = _all_rules(rules_dir)
     if state:
         rules = apply_rule_state(rules, state)
     return rules

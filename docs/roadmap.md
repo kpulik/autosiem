@@ -38,6 +38,7 @@
 - [x] Generic OpenAI-compatible LLM config (URL + optional API key + context window/sampling limits; URL alone infers backend)
 - [x] ATT&CK coverage matrix (CLI `coverage` report: full-matrix coverage from MITRE's published bundle, per-tactic breakdown, invalid-technique detection, plus the curated watchlist)
 - [x] Sigma import (YAML subset, auto-converted at load; see `rules/encoded_powershell.yaml`)
+- [x] SigmaHQ community rule sync (`cli sigma-sync`) — pulls a published release bundle over one HTTPS request, imports only rules whose every field the event model actually populates, and counts the rest as needs-fields-we-lack or unsupported-syntax with a field histogram. Takes matrix coverage 2.9% → 15.4%.
 - [x] Sigma rule export (`autosiem.cli export` writes `<rule_id>.yaml` per rule)
 - [x] Rule tests and CI (per-rule positive/negative harness in `tests/test_rules.py` — every rule in `rules/` must have cases or the suite fails; GitHub Actions workflow in `.github/workflows/ci.yml` runs the suite + coverage smoke + pyright on Python 3.10/3.12 — live on the private GitHub repo `kpulik/autosiem`)
 

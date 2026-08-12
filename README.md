@@ -101,7 +101,29 @@ python3 scripts/build_attack_index.py
 Both paths run the same distillation, so they produce byte-identical output for
 the same ATT&CK release.
 
-Sigma rules work out of the box: drop a `.yaml` Sigma rule into `rules/` (see `rules/encoded_powershell.yaml`) and it is parsed and converted automatically when you run `demo` or `ingest`. To share your rules back with the Sigma ecosystem, export them:
+Pull runnable detections from the SigmaHQ community ruleset:
+
+```bash
+PYTHONPATH=src python -m autosiem.cli sigma-sync --db data/autosiem.db
+export AUTOSIEM_SIGMA_DIR=data/autosiem.sigma
+```
+
+The sync is deliberately conservative about what it counts as a win. Parsing a
+rule is not the same as being able to run it: most SigmaHQ rules match on
+Windows event fields (`EventID`, `TargetObject`, `ParentImage`) that AutoSIEM's
+event model does not populate, so they would import cleanly, add their ATT&CK
+technique to the coverage report, and never fire. Every candidate therefore
+lands in one of three counted buckets — imported, needs-fields-we-lack, or
+unsupported-syntax — and the report names the fields that blocked the rest, so
+"why is coverage low" becomes a ranked list of normalizer work.
+
+On SigmaHQ r2026-07-01: **1377 examined, 171 imported, 1088 need fields the
+event model lacks, 118 unsupported syntax**, taking matrix coverage from
+**2.9% to 15.4%** (parents 6.8% → 32.9%). Curated rules win on a rule-id
+collision, so synced content never replaces a rule this project authored and
+tested.
+
+Sigma rules also work out of the box: drop a `.yaml` Sigma rule into `rules/` (see `rules/encoded_powershell.yaml`) and it is parsed and converted automatically when you run `demo` or `ingest`. To share your rules back with the Sigma ecosystem, export them:
 
 ```bash
 PYTHONPATH=src python -m autosiem.cli export --rules rules --out-dir /tmp/sigma-rules
