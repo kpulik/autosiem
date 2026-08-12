@@ -2,7 +2,8 @@
 
 The zip is built in-memory from rule text, so the suite stays offline. Field
 names mirror the real bundle, verified against SigmaHQ r2026-07-01 on
-2026-08-11: 1377 rules, 176 runnable, 71 unsupported syntax.
+2026-08-11: 1377 examined, 171 imported, 1088 needing fields the event model
+does not populate, 118 unsupported syntax.
 """
 from __future__ import annotations
 
