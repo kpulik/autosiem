@@ -51,7 +51,13 @@ def _match_operator(actual: Any, expected: dict[str, Any]) -> bool:
             return False
         if operator == "contains_any" and not any(str(item).lower() in text.lower() for item in value):
             return False
+        if operator == "not_contains" and str(value).lower() in text.lower():
+            return False
+        if operator == "not_contains_any" and any(str(item).lower() in text.lower() for item in value):
+            return False
         if operator == "regex" and not re.search(str(value), text, flags=re.IGNORECASE):
+            return False
+        if operator == "not_regex" and re.search(str(value), text, flags=re.IGNORECASE):
             return False
         if operator == "equals" and text != str(value):
             return False
@@ -59,11 +65,19 @@ def _match_operator(actual: Any, expected: dict[str, Any]) -> bool:
             return False
         if operator == "startswith" and not text.lower().startswith(str(value).lower()):
             return False
+        if operator == "not_startswith" and text.lower().startswith(str(value).lower()):
+            return False
         if operator == "endswith" and not text.lower().endswith(str(value).lower()):
+            return False
+        if operator == "not_endswith" and text.lower().endswith(str(value).lower()):
             return False
         if operator == "startswith_any" and not any(text.lower().startswith(str(item).lower()) for item in value):
             return False
+        if operator == "not_startswith_any" and any(text.lower().startswith(str(item).lower()) for item in value):
+            return False
         if operator == "endswith_any" and not any(text.lower().endswith(str(item).lower()) for item in value):
+            return False
+        if operator == "not_endswith_any" and any(text.lower().endswith(str(item).lower()) for item in value):
             return False
         if operator == "in" and actual not in value:
             return False
