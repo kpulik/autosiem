@@ -72,6 +72,20 @@ class NormalizedEvent:
     command_line: str | None = None
     cloud_account: str | None = None
     resource: str | None = None
+    event_code: str | int | None = None
+    original_file_name: str | None = None
+    parent_process_name: str | None = None
+    parent_command_line: str | None = None
+    target_object: str | None = None
+    target_file_name: str | None = None
+    details: str | None = None
+    script_block_text: str | None = None
+    image_loaded: str | None = None
+    provider_name: str | None = None
+    hashes: str | None = None
+    integrity_level: str | None = None
+    log_product: str | None = None
+    log_service: str | None = None
     labels: dict[str, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -104,6 +118,20 @@ class NormalizedEvent:
             "command_line": self.command_line,
             "cloud_account": self.cloud_account,
             "resource": self.resource,
+            "event_code": self.event_code,
+            "original_file_name": self.original_file_name,
+            "parent_process_name": self.parent_process_name,
+            "parent_command_line": self.parent_command_line,
+            "target_object": self.target_object,
+            "target_file_name": self.target_file_name,
+            "details": self.details,
+            "script_block_text": self.script_block_text,
+            "image_loaded": self.image_loaded,
+            "provider_name": self.provider_name,
+            "hashes": self.hashes,
+            "integrity_level": self.integrity_level,
+            "log_product": self.log_product,
+            "log_service": self.log_service,
             "labels": self.labels,
             "raw": self.raw,
         }

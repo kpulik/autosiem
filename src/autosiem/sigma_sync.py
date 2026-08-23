@@ -137,7 +137,7 @@ def selection_field_names(selection: Any, into: set[str]) -> None:
     if isinstance(selection, dict):
         for key, value in selection.items():
             text = str(key)
-            if text.startswith("__") or text in {"any_of", "all_of"}:
+            if text.startswith("__") or text in {"any_of", "all_of", "not"}:
                 selection_field_names(value, into)
                 continue
             into.add(text.split(".", 1)[0])

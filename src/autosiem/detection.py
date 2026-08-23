@@ -32,6 +32,22 @@ def evaluate_rule(event: NormalizedEvent, rule: DetectionRule) -> Finding | None
 
 def _matches_selection(doc: dict[str, Any], selection: dict[str, Any]) -> bool:
     for field, expected in selection.items():
+        if field == "any_of":
+            if not isinstance(expected, list) or not any(
+                isinstance(branch, dict) and _matches_selection(doc, branch) for branch in expected
+            ):
+                return False
+            continue
+        if field == "all_of":
+            if not isinstance(expected, list) or not all(
+                isinstance(branch, dict) and _matches_selection(doc, branch) for branch in expected
+            ):
+                return False
+            continue
+        if field == "not":
+            if not isinstance(expected, dict) or _matches_selection(doc, expected):
+                return False
+            continue
         actual = _get_dotted(doc, field)
         if isinstance(expected, dict):
             if not _match_operator(actual, expected):
@@ -51,9 +67,13 @@ def _match_operator(actual: Any, expected: dict[str, Any]) -> bool:
             return False
         if operator == "contains_any" and not any(str(item).lower() in text.lower() for item in value):
             return False
+        if operator == "contains_all" and not all(str(item).lower() in text.lower() for item in value):
+            return False
         if operator == "not_contains" and str(value).lower() in text.lower():
             return False
         if operator == "not_contains_any" and any(str(item).lower() in text.lower() for item in value):
+            return False
+        if operator == "not_contains_all" and all(str(item).lower() in text.lower() for item in value):
             return False
         if operator == "regex" and not re.search(str(value), text, flags=re.IGNORECASE):
             return False
@@ -73,11 +93,19 @@ def _match_operator(actual: Any, expected: dict[str, Any]) -> bool:
             return False
         if operator == "startswith_any" and not any(text.lower().startswith(str(item).lower()) for item in value):
             return False
+        if operator == "startswith_all" and not all(text.lower().startswith(str(item).lower()) for item in value):
+            return False
         if operator == "not_startswith_any" and any(text.lower().startswith(str(item).lower()) for item in value):
+            return False
+        if operator == "not_startswith_all" and all(text.lower().startswith(str(item).lower()) for item in value):
             return False
         if operator == "endswith_any" and not any(text.lower().endswith(str(item).lower()) for item in value):
             return False
+        if operator == "endswith_all" and not all(text.lower().endswith(str(item).lower()) for item in value):
+            return False
         if operator == "not_endswith_any" and any(text.lower().endswith(str(item).lower()) for item in value):
+            return False
+        if operator == "not_endswith_all" and all(text.lower().endswith(str(item).lower()) for item in value):
             return False
         if operator == "in" and actual not in value:
             return False
