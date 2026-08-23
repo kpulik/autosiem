@@ -2,8 +2,8 @@
 
 The zip is built in-memory from rule text, so the suite stays offline. Field
 names mirror the real bundle, verified against SigmaHQ r2026-07-01 on
-2026-08-11: 1377 examined, 171 imported, 1088 needing fields the event model
-does not populate, 118 unsupported syntax.
+2026-08-22: 1377 examined, 176 imported, 1126 needing fields the event model
+does not populate, 75 unsupported syntax.
 """
 from __future__ import annotations
 
@@ -97,6 +97,20 @@ detection:
     selection:
         Image|endswith: '\\mimikatz.exe'
     condition: selection
+"""
+
+FILTERED_RUNNABLE = """
+title: Encoded PowerShell With Exclusion
+id: 55555555-5555-5555-5555-555555555555
+level: high
+logsource:
+    category: process_creation
+detection:
+    selection:
+        CommandLine|contains: ' -enc '
+    filter:
+        CommandLine|contains: 'AzureAD'
+    condition: selection and not filter
 """
 
 RELEASE_JSON = {
@@ -240,6 +254,20 @@ def test_sync_records_unsupported_syntax_with_a_sample(tmp_path: Path) -> None:
     report = sync_rules(tmp_path / "synced", fetch=_fetch())
     assert report.syntax_samples
     assert "flash.yml" in report.syntax_samples[0]
+
+
+def test_sync_imports_exact_single_field_negation(tmp_path: Path) -> None:
+    report = sync_rules(
+        tmp_path / "synced",
+        fetch=_fetch({"rules/windows/process_creation/filtered.yml": FILTERED_RUNNABLE}),
+    )
+    rules = load_synced_rules(tmp_path / "synced")
+    assert report.imported == 1
+    assert report.unsupported_syntax == 0
+    assert rules[0].selection["command_line"] == {
+        "contains": " -enc ",
+        "not_contains": "AzureAD",
+    }
 
 
 def test_synced_rules_round_trip_through_the_normal_loader(tmp_path: Path) -> None:

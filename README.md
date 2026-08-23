@@ -117,9 +117,9 @@ lands in one of three counted buckets — imported, needs-fields-we-lack, or
 unsupported-syntax — and the report names the fields that blocked the rest, so
 "why is coverage low" becomes a ranked list of normalizer work.
 
-On SigmaHQ r2026-07-01: **1377 examined, 171 imported, 1088 need fields the
-event model lacks, 118 unsupported syntax**, taking matrix coverage from
-**2.9% to 15.4%** (parents 6.8% → 32.9%). Curated rules win on a rule-id
+On SigmaHQ r2026-07-01: **1377 examined, 176 imported, 1126 need fields the
+event model lacks, 75 unsupported syntax**, taking matrix coverage from
+**2.9% to 15.6%** (parents 6.8% to 33.3%). Curated rules win on a rule-id
 collision, so synced content never replaces a rule this project authored and
 tested.
 

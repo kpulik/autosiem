@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
+
+from autosiem.detection import evaluate_rule
+from autosiem.normalization import normalize, parse_raw_line
 from autosiem.rules import load_rules
-from autosiem.schemas import Severity
+from autosiem.schemas import DetectionRule, Severity
 from autosiem.sigma import (
+    SigmaParseError,
     load_sigma_file,
     parse_sigma_yaml,
     sigma_to_rule,
@@ -121,8 +127,110 @@ detection:
     CommandLine|contains: AzureAD
 """
     rule = sigma_to_rule(parse_sigma_yaml(text))
-    # The filter's contains is negated best-effort via not_equals.
-    assert rule.selection["command_line"] == {"not_equals": "{'contains': 'AzureAD'}"}
+    assert rule.selection["command_line"] == {"not_contains": "AzureAD"}
+
+
+def test_condition_not_filter_preserves_include_on_the_same_field() -> None:
+    """A filter must not overwrite the positive predicate it narrows."""
+    text = """\
+title: Encoded PowerShell
+detection:
+  selection:
+    CommandLine|contains:
+      - '-enc'
+      - '-encodedcommand'
+  filter:
+    CommandLine|contains:
+      - 'AzureAD'
+      - 'ModuleAnalyzer'
+  condition: selection and not filter
+"""
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+    assert rule.selection["command_line"] == {
+        "contains_any": ["-enc", "-encodedcommand"],
+        "not_contains_any": ["AzureAD", "ModuleAnalyzer"],
+    }
+
+    def matches(command_line: str) -> bool:
+        event = normalize(parse_raw_line(json.dumps({"category": "process", "command_line": command_line})))
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("powershell.exe -enc SQBFAFgA") is True
+    assert matches("powershell.exe -enc AzureAD") is False
+    assert matches("powershell.exe Get-Date") is False
+
+
+def test_condition_not_filter_maps_every_supported_operator_exactly() -> None:
+    cases = [
+        ("CommandLine|contains: benign", "command_line", {"not_contains": "benign"}),
+        (
+            r"Image|endswith: ['\trusted.exe', '\signed.exe']",
+            "process_name",
+            {"not_endswith_any": ["\\trusted.exe", "\\signed.exe"]},
+        ),
+        ("User|startswith: svc-", "user", {"not_startswith": "svc-"}),
+        ("Host|re: '^lab-[0-9]+$'", "host", {"not_regex": "^lab-[0-9]+$"}),
+    ]
+    for filter_line, field, expected in cases:
+        text = f"""\
+title: Exact negation
+detection:
+  selection:
+    Category: process
+  filter:
+    {filter_line}
+  condition: selection and not filter
+"""
+        rule = sigma_to_rule(parse_sigma_yaml(text))
+        assert rule.selection[field] == expected
+
+
+@pytest.mark.parametrize(
+    ("operator", "value", "allowed", "blocked"),
+    [
+        ("not_contains", "benign", "powershell -enc", "powershell -enc benign"),
+        ("not_contains_any", ["benign", "trusted"], "powershell -enc", "trusted command"),
+        ("not_startswith", "svc-", "alice", "svc-backup"),
+        ("not_startswith_any", ["svc-", "system"], "alice", "SYSTEM-user"),
+        ("not_endswith", ".signed.exe", "payload.exe", "payload.signed.exe"),
+        ("not_endswith_any", [".signed.exe", ".trusted.exe"], "payload.exe", "tool.trusted.exe"),
+        ("not_regex", r"^lab-[0-9]+$", "prod-7", "lab-42"),
+    ],
+)
+def test_negated_detection_operators_enforce_exclusions(
+    operator: str, value: object, allowed: str, blocked: str
+) -> None:
+    rule = DetectionRule(
+        rule_id="NEGATION-TEST",
+        name="Negation test",
+        description="",
+        severity=Severity.MEDIUM,
+        risk_points=Severity.MEDIUM.value,
+        selection={"command_line": {operator: value}},
+    )
+
+    def matches(command_line: str) -> bool:
+        event = normalize(parse_raw_line(json.dumps({"category": "process", "command_line": command_line})))
+        return evaluate_rule(event, rule) is not None
+
+    assert matches(allowed) is True
+    assert matches(blocked) is False
+
+
+def test_multi_field_negated_filter_is_rejected_instead_of_approximated() -> None:
+    """NOT(A AND B) cannot be represented by the flat AND selection model."""
+    text = """\
+title: Unsupported De Morgan filter
+detection:
+  selection:
+    Category: process
+  filter:
+    User: SYSTEM
+    Image|endswith: '\\trusted.exe'
+  condition: selection and not filter
+"""
+    with pytest.raises(SigmaParseError, match="multi-field negated filter"):
+        sigma_to_rule(parse_sigma_yaml(text))
 
 
 def test_startswith_endswith_re_modifiers() -> None:

@@ -21,7 +21,7 @@ Detection mapping notes
 * ``field: x`` (scalar)      -> ``{"<field>": x}``  (exact match)
 * ``field: [a, b]``          -> ``{"<field>": {"in": [a, b]}}``
 * ``keywords: [...]``        -> ``{"raw.message": {"contains_any": [...]}}``
-* ``condition: selection and not filter`` negates the filter fields.
+* ``condition: selection and not filter`` negates a single-field filter exactly.
 
 Sigma fields like ``CommandLine`` are lowercased and, where a well-known alias
 exists, mapped to our schema (``CommandLine`` -> ``command_line``).
@@ -61,7 +61,7 @@ _FIELD_ALIASES = {
 }
 
 # Modifiers that take a single string value.
-_SINGLE_VALUE_MODIFIERS = {"contains", "startswith", "endswith", "re", "equals"}
+_SINGLE_VALUE_MODIFIERS = {"contains", "startswith", "endswith", "re", "equals", "exists"}
 # Modifiers that can take a list of values (any-of semantics).
 _ANY_VALUE_MODIFIERS = {"contains"}
 
@@ -380,30 +380,61 @@ def _sigma_detection_to_selection(detection: dict[str, Any]) -> dict[str, Any]:
             negate = True
             block = token[4:].strip()
         if block == "keywords":
-            sel.update(_sigma_fields_to_selection({"keywords": detection.get("keywords")}))
-            continue
-        mapped = _sigma_fields_to_selection(dict(detection.get(block) or {}))
-        if negate:
-            for field, expected in mapped.items():
-                sel[field] = _negate_expected(expected)
+            mapped = _sigma_fields_to_selection({"keywords": detection.get("keywords")})
         else:
-            sel.update(mapped)
+            mapped = _sigma_fields_to_selection(dict(detection.get(block) or {}))
+        if negate:
+            if len(mapped) > 1:
+                raise SigmaParseError(
+                    f"multi-field negated filter {block!r} cannot be represented by the selection engine"
+                )
+            for field, expected in mapped.items():
+                _merge_selection_predicate(sel, field, _negate_expected(expected))
+        else:
+            for field, expected in mapped.items():
+                _merge_selection_predicate(sel, field, expected)
     return sel
 
 
-def _negate_expected(expected: Any) -> dict[str, Any]:
-    """Express ``not <filter value>`` using our selection operators.
+def _merge_selection_predicate(selection: dict[str, Any], field: str, expected: Any) -> None:
+    """AND one field predicate into a flat selection without overwriting it."""
+    if field not in selection:
+        selection[field] = expected
+        return
 
-    Handles exact-match and in-list filters cleanly; falls back to a best-effort
-    ``not_equals`` on the serialized value for operator-style filters.
-    """
+    current = selection[field]
+    current_operators = current if isinstance(current, dict) else {"equals": current}
+    new_operators = expected if isinstance(expected, dict) else {"equals": expected}
+    duplicate = set(current_operators).intersection(new_operators)
+    if duplicate:
+        names = ", ".join(sorted(duplicate))
+        raise SigmaParseError(f"multiple {names} predicates for field {field!r} cannot be represented")
+    selection[field] = {**current_operators, **new_operators}
+
+
+def _negate_expected(expected: Any) -> dict[str, Any]:
+    """Express a single-field ``not <filter value>`` exactly."""
     if isinstance(expected, dict):
-        if "equals" in expected:
-            return {"not_equals": expected["equals"]}
-        if "in" in expected:
-            return {"not_in": list(expected["in"])}
-        return {"not_equals": str(expected)}
-    return {"not_equals": str(expected)}
+        if len(expected) != 1:
+            raise SigmaParseError(f"multi-operator filter cannot be negated exactly: {expected!r}")
+        (operator, value), = expected.items()
+        opposites = {
+            "equals": "not_equals",
+            "in": "not_in",
+            "contains": "not_contains",
+            "contains_any": "not_contains_any",
+            "startswith": "not_startswith",
+            "startswith_any": "not_startswith_any",
+            "endswith": "not_endswith",
+            "endswith_any": "not_endswith_any",
+            "regex": "not_regex",
+        }
+        if operator == "exists":
+            return {"exists": not bool(value)}
+        if operator not in opposites:
+            raise SigmaParseError(f"filter operator {operator!r} cannot be negated exactly")
+        return {opposites[operator]: value}
+    return {"not_equals": expected}
 
 
 def _sigma_fields_to_selection(fields: dict[str, Any]) -> dict[str, Any]:
@@ -444,6 +475,8 @@ def _map_field_value(value: Any, modifier: str | None) -> Any:
         return {"regex": str(value)}
     if modifier == "equals":
         return str(value)
+    if modifier == "exists":
+        return {"exists": bool(value)}
     if isinstance(value, list):
         return {"in": _as_list(value)}
     return value
@@ -484,9 +517,9 @@ def rule_to_sigma(rule: DetectionRule) -> str:
 
     Round-trips through :func:`sigma_to_rule` for the supported operator set,
     except ``tags``/``risk_points``: Sigma has no risk field, so import derives
-    ``risk_points`` from the level (lossy by design). Negated predicates
-    (``not_equals``/``not_in``/``exists: False``) are emitted as a ``filter``
-    group with ``condition: selection and not filter``.
+    ``risk_points`` from the level (lossy by design). Negated predicates are
+    emitted as a ``filter`` group with
+    ``condition: selection and not filter``.
     """
     selection, filters = _split_selection(rule.selection)
     lines: list[str] = [
@@ -504,10 +537,16 @@ def rule_to_sigma(rule: DetectionRule) -> str:
     for field, expected in selection.items():
         lines.append(_export_field(field, expected, "  "))
     if filters:
-        lines.append("  filter:")
-        for field, expected in filters.items():
+        filter_names = (
+            ["filter"]
+            if len(filters) == 1
+            else [f"filter_{index}" for index in range(1, len(filters) + 1)]
+        )
+        for filter_name, (field, expected) in zip(filter_names, filters.items()):
+            lines.append(f"  {filter_name}:")
             lines.append(_export_field(field, expected, "  "))
-        lines.append("  condition: selection and not filter")
+        condition = " and ".join(["selection", *(f"not {name}" for name in filter_names)])
+        lines.append(f"  condition: {condition}")
     else:
         lines.append("  condition: selection")
     lines.append(f"level: {rule.severity.name.lower()}")
@@ -534,24 +573,40 @@ def export_rules(rules: list[DetectionRule], out_dir: str | Path) -> list[Path]:
 def _split_selection(selection: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     """Partition selection into an include map and a Sigma ``filter`` map.
 
-    ``not_equals``/``not_in``/``exists: False`` become a negated filter group so
-    the emitted rule reads ``condition: selection and not filter``.
+    Negative operators become their positive equivalents in a negated filter
+    group so the emitted rule reads ``condition: selection and not filter``.
     """
+    negative_to_positive = {
+        "not_equals": "equals",
+        "not_in": "in",
+        "not_contains": "contains",
+        "not_contains_any": "contains_any",
+        "not_startswith": "startswith",
+        "not_startswith_any": "startswith_any",
+        "not_endswith": "endswith",
+        "not_endswith_any": "endswith_any",
+        "not_regex": "regex",
+    }
     include: dict[str, Any] = {}
     filters: dict[str, Any] = {}
     for field, expected in selection.items():
-        if isinstance(expected, dict) and len(expected) == 1:
-            (operator, value), = expected.items()
-            if operator == "not_equals":
-                filters[field] = value
-                continue
-            if operator == "not_in":
-                filters[field] = value
-                continue
-            if operator == "exists" and value is False:
-                filters[field] = False
-                continue
-        include[field] = expected
+        if not isinstance(expected, dict):
+            include[field] = expected
+            continue
+
+        include_operators: dict[str, Any] = {}
+        filter_operators: dict[str, Any] = {}
+        for operator, value in expected.items():
+            if operator in negative_to_positive:
+                filter_operators[negative_to_positive[operator]] = value
+            elif operator == "exists" and value is False:
+                filter_operators["exists"] = True
+            else:
+                include_operators[operator] = value
+        if include_operators:
+            include[field] = include_operators
+        if filter_operators:
+            filters[field] = filter_operators
     return include, filters
 
 

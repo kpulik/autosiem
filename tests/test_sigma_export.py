@@ -91,7 +91,23 @@ def test_export_negation_becomes_filter_group() -> None:
         }
     )
     text = rule_to_sigma(rule)
-    assert "filter:" in text
+    assert "filter_1:" in text
+    assert "filter_2:" in text
+    assert "condition: selection and not filter_1 and not filter_2" in text
+    assert_round_trips(rule)
+
+
+def test_export_same_field_include_and_exact_negation_round_trips() -> None:
+    rule = make_rule(
+        selection={
+            "command_line": {
+                "contains_any": ["-enc", "-encodedcommand"],
+                "not_contains_any": ["AzureAD", "ModuleAnalyzer"],
+            }
+        }
+    )
+    text = rule_to_sigma(rule)
+    assert text.count("command_line|contains:") == 2
     assert "condition: selection and not filter" in text
     assert_round_trips(rule)
 

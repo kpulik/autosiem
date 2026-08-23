@@ -1,12 +1,12 @@
 # AutoSIEM roadmap
 
-## Current status (2026-08-08)
+## Current status (2026-08-22)
 
-- **618 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
+- **733 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
 - **UEBA + incident correlation deepened (2026-08-08)**: `anomaly.py` now scores seven named behavioral signals (novel action / source IP / host, off-hours, population rarity, peer-group rarity, burst) against a per-tenant baseline persisted in SQLite, with warm-up gating and a per-signal explanation on every finding; `risk.py` correlates findings through a 24h-windowed entity graph so one incident spans user ↔ host ↔ IP ↔ cloud account and carries a time-ordered kill chain.
 - **16 detection rules** covering **20 MITRE ATT&CK techniques**. Measured against MITRE's published matrix (ATT&CK **19.2**, vendored as a distilled index): **20/697 techniques (2.9%)** and **15/222 parent techniques (6.8%)**, with a per-tactic breakdown and zero technique IDs that MITRE no longer publishes. The separate 15-technique curated watchlist is fully covered. The small percentage is the honest one — this is a demonstration rule set, not a production content library.
 - Demo `examples/events.jsonl` (15 events) runs a full kill-chain on profile `alice` → one critical incident (risk 1000) for which the AI runtime proposes containment (never auto-executes).
-- Sigma YAML import/export round-trip rules losslessly; the per-rule test harness + CI (suite + coverage smoke + pyright on Py 3.10/3.12) are live on the private repo `kpulik/autosiem`.
+- Sigma YAML import/export round-trip rules losslessly; the per-rule test harness + CI (suite + coverage smoke + pyright on Py 3.10/3.12) are live on the public repo `kpulik/autosiem`.
 - Phase 2 ingest surface shipped: syslog/CEF UDP listeners, 9 connectors (file/cloudtrail/okta/github/entra/sysmon/zeek/suricata/asset), per-source health, STIX/TAXII threat-intel ingestion.
 - **Phase 4 copilot + the audit-chain/metrics parts of Phase 3 are now WIRED**, **multi-tenant RBAC is implemented + wired** (`src/autosiem/rbac.py`, CLI `users`, RBAC token guard in the API), and **the Phase-3 distributed pipeline is wired** (`src/autosiem/distributed.py` — durable queue, workers, archive, ClickHouse/OpenSearch backends, all opt-in via `AUTOSIEM_*` env vars on `cli ingest`/`listen`). A first-alpha security review + High hardening (SEC-001..SEC-004) completed now lives in `docs/security-review.md`.
 - **RBAC depth is now shipped**: per-tenant row isolation on the data plane (`tenant_id` on events/findings/incidents/investigations/action_proposals), token rotation + revocation (CLI `users rotate|revoke`, `POST /api/users/{name}/rotate-token|revoke-token`), and a full user-management audit trail written into the hash-chained audit log.
@@ -38,9 +38,9 @@
 - [x] Generic OpenAI-compatible LLM config (URL + optional API key + context window/sampling limits; URL alone infers backend)
 - [x] ATT&CK coverage matrix (CLI `coverage` report: full-matrix coverage from MITRE's published bundle, per-tactic breakdown, invalid-technique detection, plus the curated watchlist)
 - [x] Sigma import (YAML subset, auto-converted at load; see `rules/encoded_powershell.yaml`)
-- [x] SigmaHQ community rule sync (`cli sigma-sync`) — pulls a published release bundle over one HTTPS request, imports only rules whose every field the event model actually populates, and counts the rest as needs-fields-we-lack or unsupported-syntax with a field histogram. Takes matrix coverage 2.9% → 15.4%.
+- [x] SigmaHQ community rule sync (`cli sigma-sync`) pulls a published release bundle over one HTTPS request, imports only rules whose every field the event model actually populates, and counts the rest as needs-fields-we-lack or unsupported-syntax with a field histogram. Current SigmaHQ r2026-07-01 result: 176 imported, taking matrix coverage from 2.9% to 15.6%.
 - [x] Sigma rule export (`autosiem.cli export` writes `<rule_id>.yaml` per rule)
-- [x] Rule tests and CI (per-rule positive/negative harness in `tests/test_rules.py` — every rule in `rules/` must have cases or the suite fails; GitHub Actions workflow in `.github/workflows/ci.yml` runs the suite + coverage smoke + pyright on Python 3.10/3.12 — live on the private GitHub repo `kpulik/autosiem`)
+- [x] Rule tests and CI (per-rule positive/negative harness in `tests/test_rules.py`; every rule in `rules/` must have cases or the suite fails; GitHub Actions runs the suite, coverage smoke test, and pyright on Python 3.10/3.12 in the public `kpulik/autosiem` repository)
 
 ## Phase 2 — Real integrations
 

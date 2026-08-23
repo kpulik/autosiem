@@ -146,31 +146,6 @@ def selection_field_names(selection: Any, into: set[str]) -> None:
             selection_field_names(item, into)
 
 
-def has_unrepresentable_negation(selection: Any) -> bool:
-    """True when a ``not`` filter degraded into comparing against a dict repr.
-
-    ``sigma._negate_expected`` can express ``not equals`` and ``not in``, but the
-    engine has no ``not_endswith``/``not_contains``, so an operator-style filter
-    falls back to ``{"not_equals": str(<dict>)}``. That comparison can never be
-    true, which silently turns the filter into a no-op and makes the rule fire
-    more broadly than its author intended.
-
-    Those rules are counted as unsupported rather than imported: a detection
-    whose exclusion clause does nothing is not the detection that was written.
-    """
-    if isinstance(selection, dict):
-        for key, value in selection.items():
-            if key == "not_equals" and isinstance(value, str):
-                text = value.strip()
-                if text.startswith("{") and text.endswith("}"):
-                    return True
-            if has_unrepresentable_negation(value):
-                return True
-    elif isinstance(selection, list):
-        return any(has_unrepresentable_negation(item) for item in selection)
-    return False
-
-
 def classify_rule(rule: DetectionRule, allowed: set[str]) -> tuple[bool, set[str]]:
     """Return ``(is_applicable, fields_the_event_model_lacks)``.
 
@@ -238,12 +213,6 @@ def sync_rules(
             report.unsupported_syntax += 1
             if len(report.syntax_samples) < 5:
                 report.syntax_samples.append(f"{name}: {type(exc).__name__}: {str(exc)[:80]}")
-            continue
-
-        if has_unrepresentable_negation(rule.selection):
-            report.unsupported_syntax += 1
-            if len(report.syntax_samples) < 5:
-                report.syntax_samples.append(f"{name}: negation not representable by the selection engine")
             continue
 
         applicable, missing = classify_rule(rule, allowed)

@@ -8,12 +8,8 @@ Cases are raw event dicts, exactly like a line in ``examples/events.jsonl``.
 They are evaluated with ``evaluate_rules`` directly (no anomaly detector, no
 suppression) so each test is precise about the rule under test.
 
-NOTE on SIG-EXEC-001: the Sigma importer's best-effort filter negation turns
-``CommandLine|contains: [AzureAD, ModuleAnalyzer]`` into a literal ``not_equals``
-on the serialized value (see ``_negate_expected`` in ``sigma.py``). That means
-the rule only matches full Windows paths (``...\\powershell.exe``), and its
-negative case below is the one command_line that stays silent. Encoded-PowerShell
-detection on short process names is covered by AUTO-EXEC-001.
+SIG-EXEC-001 exercises a same-field Sigma exclusion: the encoded-command
+selection and the AzureAD/ModuleAnalyzer filter must both remain active.
 """
 
 from __future__ import annotations
@@ -70,7 +66,8 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
             {"category": "process", "process_name": r"C:\Program Files\PowerShell\7\pwsh.exe", "command_line": "pwsh.exe -noprofile -enc SQBFAFgA"},
         ],
         "silent": [
-            {"category": "process", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "{'contains_any': ['AzureAD', 'ModuleAnalyzer']}"},
+            {"category": "process", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -enc AzureAD"},
+            {"category": "process", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -NoProfile -Command Get-Date"},
         ],
     },
     "AUTO-EXEC-002": {
