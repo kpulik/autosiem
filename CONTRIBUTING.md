@@ -85,9 +85,10 @@ not "fix" it by quoting the comments.
 
 Available selection operators are defined by `_match_operator` in
 `detection.py`: plain equality, list membership, `contains`, `contains_any`,
-`startswith`, `endswith`, `startswith_any`, `endswith_any`, `regex`, `in`,
-`not_in`, `not_equals`, `exists`. There is deliberately no `any_of` and no
-numeric comparison — express OR branches with `regex`, or split into two rules.
+`contains_all`, `startswith`, `endswith`, their `*_any`/`*_all` variants,
+`regex`, `in`, `not_in`, `not_equals`, `exists`, and their exact negative
+string variants. Recursive `any_of`, `all_of`, and `not` nodes represent
+Boolean conditions. Numeric comparison is not implemented.
 
 ## Adding a connector
 

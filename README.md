@@ -109,17 +109,18 @@ export AUTOSIEM_SIGMA_DIR=data/autosiem.sigma
 ```
 
 The sync is deliberately conservative about what it counts as a win. Parsing a
-rule is not the same as being able to run it: most SigmaHQ rules match on
-Windows event fields (`EventID`, `TargetObject`, `ParentImage`) that AutoSIEM's
-event model does not populate, so they would import cleanly, add their ATT&CK
-technique to the coverage report, and never fire. Every candidate therefore
-lands in one of three counted buckets — imported, needs-fields-we-lack, or
-unsupported-syntax — and the report names the fields that blocked the rest, so
+rule is not the same as being able to run it. AutoSIEM normalizes common Windows
+fields such as `EventID`, `TargetObject`, `ParentImage`, and `ScriptBlockText`,
+preserves Sigma `logsource` product/service scope, and evaluates Boolean
+`and`/`or`/`not` plus `1 of`/`all of` conditions exactly. Rules that need other
+fields or unsupported modifiers are not imported. Every candidate therefore
+lands in one of three counted buckets: imported, needs-fields-we-lack, or
+unsupported-syntax. The report names the fields that blocked the rest, so
 "why is coverage low" becomes a ranked list of normalizer work.
 
-On SigmaHQ r2026-07-01: **1377 examined, 176 imported, 1126 need fields the
-event model lacks, 75 unsupported syntax**, taking matrix coverage from
-**2.9% to 15.6%** (parents 6.8% to 33.3%). Curated rules win on a rule-id
+On SigmaHQ r2026-07-01: **1377 examined, 895 imported, 437 need fields the
+event model lacks, 45 unsupported syntax**, taking matrix coverage from
+**2.9% to 30.3%** (parents 6.8% to 49.1%). Curated rules win on a rule-id
 collision, so synced content never replaces a rule this project authored and
 tested.
 

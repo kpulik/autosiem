@@ -147,6 +147,8 @@ def cloudtrail_record_to_raw(record: dict[str, Any]) -> dict[str, Any]:
         "format": "cloudtrail",
         "category": "cloud",  # explicit: CloudTrail records are always cloud events
         "source": "aws.cloudtrail",
+        "log_product": "aws",
+        "log_service": "cloudtrail",
         "event_source": record.get("eventSource"),
         "event_type": record.get("eventType"),
         "timestamp": record.get("eventTime"),
@@ -302,6 +304,8 @@ def okta_to_raw(record: dict[str, Any]) -> dict[str, Any]:
     mapped = {
         "format": "okta_system_log",
         "source": "okta",
+        "log_product": "okta",
+        "log_service": "okta",
         "timestamp": record.get("published") or record.get("ts") or record.get("dateTime"),
         "event_id": record.get("uuid"),
         "action": action,
@@ -330,6 +334,8 @@ def github_to_raw(record: dict[str, Any]) -> dict[str, Any]:
         "format": "github_audit",
         "category": "cloud",
         "source": "github",
+        "log_product": "github",
+        "log_service": "audit",
         "timestamp": ts,
         "action": record.get("action"),
         "user": record.get("actor") or record.get("user"),
@@ -359,6 +365,8 @@ def entra_to_raw(record: dict[str, Any]) -> dict[str, Any]:
         "format": "entra_signin",
         "category": "authentication",
         "source": "microsoft.entra",
+        "log_product": "azure",
+        "log_service": "signinlogs",
         "timestamp": record.get("createdDateTime") or record.get("activityDateTime") or record.get("timestamp"),
         "event_id": record.get("id"),
         "action": action,
@@ -385,17 +393,34 @@ def _sysmon_dict(rec: dict[str, Any]) -> dict[str, Any]:
     parent = ed.get("ParentImage") or system.get("ParentImage") or rec.get("ParentImage")
     utc = system.get("UtcTime") or ed.get("UtcTime") or rec.get("UtcTime")
     computer = system.get("Computer") or rec.get("Computer")
-    event_id = system.get("EventID") or rec.get("EventID")
+    event_code = system.get("EventID") or rec.get("EventID")
+    event_id = system.get("EventRecordID") or rec.get("EventRecordID")
+    provider_raw = system.get("Provider") or rec.get("ProviderName")
+    provider = provider_raw.get("Name") if isinstance(provider_raw, dict) else provider_raw
     return {
         "format": "sysmon",
         "category": "process",
         "source": "sysmon",
+        "log_product": "windows",
+        "log_service": "sysmon",
         "timestamp": utc,
         "event_id": str(event_id) if event_id is not None else None,
+        "event_code": event_code,
         "action": "process_start",
         "process_name": _basename(image),
         "command_line": cmdline,
         "resource": parent,
+        "original_file_name": ed.get("OriginalFileName") or rec.get("OriginalFileName"),
+        "parent_process_name": parent,
+        "parent_command_line": ed.get("ParentCommandLine") or rec.get("ParentCommandLine"),
+        "target_object": ed.get("TargetObject") or rec.get("TargetObject"),
+        "target_file_name": ed.get("TargetFilename") or rec.get("TargetFilename"),
+        "details": ed.get("Details") or rec.get("Details"),
+        "script_block_text": ed.get("ScriptBlockText") or rec.get("ScriptBlockText"),
+        "image_loaded": ed.get("ImageLoaded") or rec.get("ImageLoaded"),
+        "provider_name": provider,
+        "hashes": ed.get("Hashes") or rec.get("Hashes"),
+        "integrity_level": ed.get("IntegrityLevel") or rec.get("IntegrityLevel"),
         "host": computer,
         "user": None,
         "sysmon_event": rec,
@@ -415,7 +440,8 @@ def _sysmon_xml(text: str) -> dict[str, Any]:
     for child in root.iter():
         if _xml_local(child.tag) == "System":
             for scc in child:
-                system[_xml_local(scc.tag)] = (scc.text or "")
+                name = _xml_local(scc.tag)
+                system[name] = (scc.get("Name") or "") if name == "Provider" else (scc.text or "")
         elif _xml_local(child.tag) == "EventData":
             for dc in child:
                 name = dc.get("Name") or _xml_local(dc.tag)
@@ -425,12 +451,26 @@ def _sysmon_xml(text: str) -> dict[str, Any]:
         "format": "sysmon",
         "category": "process",
         "source": "sysmon",
+        "log_product": "windows",
+        "log_service": "sysmon",
         "timestamp": system.get("UtcTime") or data.get("UtcTime"),
-        "event_id": system.get("EventID"),
+        "event_id": system.get("EventRecordID"),
+        "event_code": system.get("EventID"),
         "action": "process_start",
         "process_name": _basename(image),
         "command_line": data.get("CommandLine") or system.get("CommandLine"),
         "resource": data.get("ParentImage") or system.get("ParentImage"),
+        "original_file_name": data.get("OriginalFileName"),
+        "parent_process_name": data.get("ParentImage") or system.get("ParentImage"),
+        "parent_command_line": data.get("ParentCommandLine"),
+        "target_object": data.get("TargetObject"),
+        "target_file_name": data.get("TargetFilename"),
+        "details": data.get("Details"),
+        "script_block_text": data.get("ScriptBlockText"),
+        "image_loaded": data.get("ImageLoaded"),
+        "provider_name": system.get("Provider"),
+        "hashes": data.get("Hashes"),
+        "integrity_level": data.get("IntegrityLevel"),
         "host": system.get("Computer"),
         "sysmon_event": {"System": system, "EventData": data},
     }
@@ -439,8 +479,8 @@ def _sysmon_xml(text: str) -> dict[str, Any]:
 def sysmon_to_raw(record: dict[str, Any] | str) -> dict[str, Any]:
     """Map a Windows Sysmon event (JSON dict or Windows-Event XML string).
 
-    ``Image``→process_name, ``CommandLine``→command_line,
-    ``ParentImage``→resource, ``UtcTime``→timestamp, ``Computer``→host.
+    ``Image`` to process_name, ``CommandLine`` to command_line, and the common
+    EventID/process-parent/file/registry/image-load fields used by Sigma rules.
     With the process category set explicitly, credential-dumping and
     masquerading rules fire on Sysmon records automatically.
     """

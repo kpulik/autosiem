@@ -26,6 +26,7 @@ from autosiem.connectors import (
     sysmon_to_raw,
     zeek_to_raw,
 )
+from autosiem.normalization import normalize
 from autosiem.pipeline import AutoSIEMPipeline
 from autosiem.rules import load_rules
 
@@ -268,23 +269,66 @@ def test_entra_maps_and_fires(tmp_path: Path) -> None:
 
 def test_sysmon_dict_fires_cred_dump(tmp_path: Path) -> None:
     source = tmp_path / "sysmon.jsonl"
-    sysmon = {"Event": {"System": {"EventID": 1, "UtcTime": "2026-08-04T10:08:00Z", "Computer": "alice-pc"}, "EventData": {"Image": "C:\\Tools\\mimikatz.exe", "CommandLine": "mimikatz.exe sekurlsa::logonpasswords"}}}
+    sysmon = {"Event": {"System": {"EventID": 1, "EventRecordID": 41, "UtcTime": "2026-08-04T10:08:00Z", "Computer": "alice-pc"}, "EventData": {"Image": "C:\\Tools\\mimikatz.exe", "CommandLine": "mimikatz.exe sekurlsa::logonpasswords", "OriginalFileName": "mimikatz.exe", "ParentImage": "C:\\Windows\\explorer.exe", "ParentCommandLine": "explorer.exe", "IntegrityLevel": "High"}}}
     source.write_text(json.dumps(sysmon) + "\n", encoding="utf-8")
     events = SysmonConnector({"path": str(source)}).poll()
     assert events[0]["process_name"] == "mimikatz.exe"
     assert events[0]["category"] == "process"
+    assert events[0]["event_id"] == "41"
+    assert events[0]["event_code"] == 1
+    assert events[0]["log_product"] == "windows"
+    assert events[0]["log_service"] == "sysmon"
+    assert events[0]["parent_process_name"].endswith("explorer.exe")
+    assert events[0]["integrity_level"] == "High"
     root = Path(__file__).resolve().parents[1]
     result = AutoSIEMPipeline(load_rules(root / "rules")).process_lines([json.dumps(e) for e in events])
     assert any(f.rule_id == "AUTO-CRED-002" for f in result.findings)
 
 
 def test_sysmon_xml_string_parsed() -> None:
-    xml = '''<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><EventID>1</EventID><Computer>alice-pc</Computer><UtcTime>2026-08-04T10:08:00Z</UtcTime></System><EventData><Data Name="Image">C:\\Tools\\mimikatz.exe</Data><Data Name="CommandLine">mimikatz.exe sekurlsa::logonpasswords</Data></EventData></Event>'''
+    xml = '''<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Sysmon"/><EventID>1</EventID><Computer>alice-pc</Computer><UtcTime>2026-08-04T10:08:00Z</UtcTime></System><EventData><Data Name="Image">C:\\Tools\\mimikatz.exe</Data><Data Name="CommandLine">mimikatz.exe sekurlsa::logonpasswords</Data></EventData></Event>'''
     raw = sysmon_to_raw(xml)
     assert raw["process_name"] == "mimikatz.exe"
     assert "sekurlsa" in raw["command_line"]
     assert raw["host"] == "alice-pc"
+    assert raw["provider_name"] == "Microsoft-Windows-Sysmon"
     assert "sysmon" in registry.names()
+
+
+def test_normalizer_projects_sigma_detection_fields() -> None:
+    raw = {
+        "EventID": 4688,
+        "OriginalFileName": "powershell.exe",
+        "ParentImage": r"C:\\Windows\\explorer.exe",
+        "ParentCommandLine": "explorer.exe",
+        "TargetObject": r"HKLM\\Software\\Run",
+        "TargetFilename": r"C:\\Temp\\payload.exe",
+        "Details": "DWORD (0x00000001)",
+        "ScriptBlockText": "Invoke-Expression",
+        "ImageLoaded": r"C:\\Temp\\suspicious.dll",
+        "ProviderName": "Microsoft-Windows-Security-Auditing",
+        "Hashes": "SHA256=abc",
+        "IntegrityLevel": "High",
+    }
+    event = normalize(raw)
+    assert event.event_code == 4688
+    assert event.original_file_name == "powershell.exe"
+    assert event.parent_process_name == r"C:\\Windows\\explorer.exe"
+    assert event.parent_command_line == "explorer.exe"
+    assert event.target_object == r"HKLM\\Software\\Run"
+    assert event.target_file_name == r"C:\\Temp\\payload.exe"
+    assert event.details == "DWORD (0x00000001)"
+    assert event.script_block_text == "Invoke-Expression"
+    assert event.image_loaded == r"C:\\Temp\\suspicious.dll"
+    assert event.provider_name == "Microsoft-Windows-Security-Auditing"
+    assert event.hashes == "SHA256=abc"
+    assert event.integrity_level == "High"
+
+
+def test_normalizer_preserves_sigma_logsource_scope() -> None:
+    event = normalize({"product": "Windows", "service": "Security"})
+    assert event.log_product == "windows"
+    assert event.log_service == "security"
 
 
 def test_zeek_http_fires_web_rule(tmp_path: Path) -> None:

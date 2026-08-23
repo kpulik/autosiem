@@ -108,7 +108,28 @@ def test_export_same_field_include_and_exact_negation_round_trips() -> None:
     )
     text = rule_to_sigma(rule)
     assert text.count("command_line|contains:") == 2
-    assert "condition: selection and not filter" in text
+    assert "condition: (selection_1 and not filter_1)" in text
+    assert_round_trips(rule)
+
+
+def test_export_boolean_selection_round_trips() -> None:
+    rule = make_rule(
+        selection={
+            "any_of": [
+                {"action": "alpha"},
+                {
+                    "all_of": [
+                        {"user": "alice"},
+                        {"not": {"host": "trusted", "user": "SYSTEM"}},
+                    ]
+                },
+            ]
+        }
+    )
+    text = rule_to_sigma(rule)
+    assert "selection_1:" in text
+    assert " or " in text
+    assert "not (" in text
     assert_round_trips(rule)
 
 
@@ -142,16 +163,27 @@ def test_export_quotes_whitespace_and_backslashes() -> None:
     assert_round_trips(rule)
 
 
+def test_export_quotes_urls_and_mixed_quotes_with_backslashes() -> None:
+    rule = make_rule(
+        selection={
+            "raw.url": {"contains_any": ["https://example.test/path"]},
+            "command_line": {
+                "contains_any": ["-Path 'C:\\Windows", '-Path "C:/Windows"', '"#', "no"]
+            },
+        }
+    )
+    assert_round_trips(rule)
+
+
 def test_export_rejects_unknown_operator() -> None:
     rule = make_rule(selection={"category": {"bogus": "x"}})
     with pytest.raises(ValueError):
         rule_to_sigma(rule)
 
 
-def test_export_rejects_multi_operator_dict() -> None:
+def test_export_multi_operator_dict_as_exact_and() -> None:
     rule = make_rule(selection={"category": {"contains": "a", "contains_any": ["b"]}})
-    with pytest.raises(ValueError):
-        rule_to_sigma(rule)
+    assert_round_trips(rule)
 
 
 def test_round_trip_all_bundled_rules() -> None:

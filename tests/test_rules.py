@@ -62,12 +62,12 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
     },
     "SIG-EXEC-001": {
         "fires": [
-            {"category": "process", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -enc SQBFAFgA"},
-            {"category": "process", "process_name": r"C:\Program Files\PowerShell\7\pwsh.exe", "command_line": "pwsh.exe -noprofile -enc SQBFAFgA"},
+            {"category": "process", "log_product": "windows", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -enc SQBFAFgA"},
+            {"category": "process", "log_product": "windows", "process_name": r"C:\Program Files\PowerShell\7\pwsh.exe", "command_line": "pwsh.exe -noprofile -enc SQBFAFgA"},
         ],
         "silent": [
-            {"category": "process", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -enc AzureAD"},
-            {"category": "process", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -NoProfile -Command Get-Date"},
+            {"category": "process", "log_product": "windows", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -enc AzureAD"},
+            {"category": "process", "log_product": "windows", "process_name": r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe", "command_line": "powershell.exe -NoProfile -Command Get-Date"},
         ],
     },
     "AUTO-EXEC-002": {

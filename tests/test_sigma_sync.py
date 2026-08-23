@@ -2,8 +2,8 @@
 
 The zip is built in-memory from rule text, so the suite stays offline. Field
 names mirror the real bundle, verified against SigmaHQ r2026-07-01 on
-2026-08-22: 1377 examined, 176 imported, 1126 needing fields the event model
-does not populate, 75 unsupported syntax.
+2026-08-22: 1377 examined, 895 imported, 437 needing fields the event model
+does not populate, 45 unsupported syntax.
 """
 from __future__ import annotations
 
@@ -62,13 +62,12 @@ logsource:
     category: registry_set
 detection:
     selection:
-        TargetObject|contains: '\\CurrentVersion\\Run'
+        CallTrace|contains: 'unknown.dll'
         EventID: 13
     condition: selection
 """
 
-# List-form selection: OR across different operators, which the subset parser
-# does not read and the detection engine could not represent anyway.
+# Deliberately invalid field block used to prove unsupported syntax is counted.
 UNSUPPORTED = """
 title: Proxy Flash Download
 id: 33333333-3333-3333-3333-333333333333
@@ -78,9 +77,7 @@ tags:
 logsource:
     category: proxy
 detection:
-    selection:
-        - c-uri|contains: '/flash_install.php'
-        - c-uri|endswith: '/install_flash_player.exe'
+    selection: unsupported-scalar
     condition: selection
 """
 
@@ -111,6 +108,18 @@ detection:
     filter:
         CommandLine|contains: 'AzureAD'
     condition: selection and not filter
+"""
+
+BOOLEAN_RUNNABLE = """
+title: Boolean Action Alternatives
+id: 66666666-6666-6666-6666-666666666666
+level: medium
+detection:
+    selection_alpha:
+        Action: alpha
+    selection_beta:
+        Action: beta
+    condition: 1 of selection_*
 """
 
 RELEASE_JSON = {
@@ -246,7 +255,7 @@ def test_sync_reports_which_fields_blocked_import(tmp_path: Path) -> None:
     """Turns "why is coverage low" into a ranked list of normalizer work."""
     report = sync_rules(tmp_path / "synced", fetch=_fetch())
     # The Sigma parser lowercases field names on the way in.
-    assert "targetobject" in report.missing_fields or "eventid" in report.missing_fields
+    assert "calltrace" in report.missing_fields
     assert all(count >= 1 for count in report.missing_fields.values())
 
 
@@ -268,6 +277,16 @@ def test_sync_imports_exact_single_field_negation(tmp_path: Path) -> None:
         "contains": " -enc ",
         "not_contains": "AzureAD",
     }
+
+
+def test_sync_persists_boolean_selection_tree(tmp_path: Path) -> None:
+    report = sync_rules(
+        tmp_path / "synced",
+        fetch=_fetch({"rules/boolean.yml": BOOLEAN_RUNNABLE}),
+    )
+    rules = load_synced_rules(tmp_path / "synced")
+    assert report.imported == 1
+    assert rules[0].selection == {"any_of": [{"action": "alpha"}, {"action": "beta"}]}
 
 
 def test_synced_rules_round_trip_through_the_normal_loader(tmp_path: Path) -> None:

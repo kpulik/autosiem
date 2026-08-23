@@ -87,6 +87,46 @@ def normalize(raw: dict[str, Any]) -> NormalizedEvent:
         command_line=_first_str(lower_keys, "command_line", "process.command_line", "cmdline", "commandline", default=None),
         cloud_account=_first_str(lower_keys, "cloud_account", "accountid", "awsaccountid", "tenantid", "subscriptionid", default=None),
         resource=_first_str(lower_keys, "resource", "resourceid", "object", "target", default=None),
+        event_code=_first_value(lower_keys, "event_code", "event.code", "eventid", default=None),
+        original_file_name=_first_str(
+            lower_keys,
+            "original_file_name",
+            "originalfilename",
+            "file.pe.original_file_name",
+            default=None,
+        ),
+        parent_process_name=_first_str(
+            lower_keys, "parent_process_name", "process.parent.name", "parentimage", default=None
+        ),
+        parent_command_line=_first_str(
+            lower_keys,
+            "parent_command_line",
+            "process.parent.command_line",
+            "parentcommandline",
+            default=None,
+        ),
+        target_object=_first_str(lower_keys, "target_object", "targetobject", default=None),
+        target_file_name=_first_str(
+            lower_keys, "target_file_name", "targetfilename", "file.path", default=None
+        ),
+        details=_first_str(lower_keys, "details", default=None),
+        script_block_text=_first_str(
+            lower_keys, "script_block_text", "scriptblocktext", default=None
+        ),
+        image_loaded=_first_str(lower_keys, "image_loaded", "imageloaded", default=None),
+        provider_name=_first_str(
+            lower_keys, "provider_name", "providername", "event.provider", default=None
+        ),
+        hashes=_first_str(lower_keys, "hashes", "file.hash", default=None),
+        integrity_level=_first_str(
+            lower_keys, "integrity_level", "integritylevel", default=None
+        ),
+        log_product=_lower_or_none(
+            _first_str(lower_keys, "log_product", "product", "os.type", default=None)
+        ),
+        log_service=_lower_or_none(
+            _first_str(lower_keys, "log_service", "service", "channel", default=None)
+        ),
         labels={"format": str(lower_keys.get("format", "json"))},
         raw=raw,
     )
@@ -98,6 +138,18 @@ def _first_str(values: dict[str, Any], *keys: str, default: str | None) -> str |
         if value is not None and str(value).strip() != "":
             return str(value)
     return default
+
+
+def _first_value(values: dict[str, Any], *keys: str, default: Any) -> Any:
+    for key in keys:
+        value = values.get(key)
+        if value is not None and str(value).strip() != "":
+            return value
+    return default
+
+
+def _lower_or_none(value: str | None) -> str | None:
+    return value.lower() if value else None
 
 
 def _infer_category(values: dict[str, Any], message: str) -> str:

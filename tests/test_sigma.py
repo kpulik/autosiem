@@ -83,6 +83,8 @@ def test_sigma_to_rule_basic_mapping() -> None:
     assert rule.mitre_attack == ["T1059.001"]
     assert rule.tags == ["attack.execution", "attack.t1059.001"]
     assert rule.enabled is True
+    assert rule.selection["log_product"] == "windows"
+    assert rule.selection["category"] == "process"
 
 
 def test_field_alias_and_modifier_mapping() -> None:
@@ -112,8 +114,40 @@ detection:
   condition: selection
 """
     rule = sigma_to_rule(parse_sigma_yaml(text))
-    assert rule.selection["eventid"] == 4688
+    assert rule.selection["event_code"] == 4688
     assert rule.selection["channel"] == {"in": ["Security", "System"]}
+
+
+def test_logsource_scope_prevents_cross_source_event_id_matches() -> None:
+    text = """\
+title: Defender Setting Disabled
+logsource:
+  product: windows
+  service: windefend
+detection:
+  selection:
+    EventID: 5010
+  condition: selection
+"""
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+
+    def matches(product: str, service: str) -> bool:
+        event = normalize(
+            parse_raw_line(
+                json.dumps(
+                    {
+                        "product": product,
+                        "service": service,
+                        "EventID": 5010,
+                    }
+                )
+            )
+        )
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("windows", "windefend") is True
+    assert matches("windows", "application") is False
+    assert matches("linux", "windefend") is False
 
 
 def test_condition_not_filter_negates_fields() -> None:
@@ -217,8 +251,8 @@ def test_negated_detection_operators_enforce_exclusions(
     assert matches(blocked) is False
 
 
-def test_multi_field_negated_filter_is_rejected_instead_of_approximated() -> None:
-    """NOT(A AND B) cannot be represented by the flat AND selection model."""
+def test_multi_field_negated_filter_preserves_boolean_semantics() -> None:
+    """NOT(A AND B) excludes only events where both filter fields match."""
     text = """\
 title: Unsupported De Morgan filter
 detection:
@@ -229,8 +263,20 @@ detection:
     Image|endswith: '\\trusted.exe'
   condition: selection and not filter
 """
-    with pytest.raises(SigmaParseError, match="multi-field negated filter"):
-        sigma_to_rule(parse_sigma_yaml(text))
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+
+    def matches(category: str, user: str, process_name: str) -> bool:
+        event = normalize(
+            parse_raw_line(
+                json.dumps({"category": category, "user": user, "process_name": process_name})
+            )
+        )
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("process", "SYSTEM", "powershell.exe") is True
+    assert matches("process", "alice", r"C:\trusted.exe") is True
+    assert matches("process", "SYSTEM", r"C:\trusted.exe") is False
+    assert matches("authentication", "SYSTEM", "powershell.exe") is False
 
 
 def test_startswith_endswith_re_modifiers() -> None:
@@ -249,6 +295,18 @@ detection:
     assert rule.selection["command_line"] == {"regex": "whoami.*net"}
 
 
+def test_unsupported_modifier_is_rejected_not_silently_dropped() -> None:
+    text = """\
+title: T
+detection:
+  selection:
+    CommandLine|contains|base64offset: powershell
+  condition: selection
+"""
+    with pytest.raises(SigmaParseError, match="base64offset"):
+        sigma_to_rule(parse_sigma_yaml(text))
+
+
 def test_keywords_maps_to_raw_message() -> None:
     text = """\
 title: T
@@ -264,19 +322,143 @@ detection:
     assert rule.selection["raw.message"] == {"contains_any": ["whoami", "net user"]}
 
 
-def test_complex_condition_falls_back_to_selection() -> None:
+def test_one_of_selection_wildcard_is_an_exact_or() -> None:
     text = """\
 title: T
 detection:
   selection_a:
-    EventID: 4688
+    Action: alpha
   selection_b:
-    EventID: 4689
+    Action: beta
   condition: 1 of selection*
 """
     rule = sigma_to_rule(parse_sigma_yaml(text))
-    # We approximate by using the plain "selection" block (absent -> empty).
-    assert rule.selection == {}
+    assert rule.selection == {"any_of": [{"action": "alpha"}, {"action": "beta"}]}
+
+    def matches(action: str) -> bool:
+        event = normalize(parse_raw_line(json.dumps({"category": "process", "action": action})))
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("alpha") is True
+    assert matches("beta") is True
+    assert matches("gamma") is False
+
+
+def test_list_form_selection_is_an_exact_or() -> None:
+    text = """\
+title: T
+detection:
+  selection:
+    - Action: alpha
+    - User: alice
+  condition: selection
+"""
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+    assert rule.selection == {"any_of": [{"action": "alpha"}, {"user": "alice"}]}
+
+    def matches(action: str, user: str) -> bool:
+        event = normalize(
+            parse_raw_line(json.dumps({"category": "process", "action": action, "user": user}))
+        )
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("alpha", "bob") is True
+    assert matches("other", "alice") is True
+    assert matches("other", "bob") is False
+
+
+def test_keyword_list_and_all_keyword_map_target_raw_message() -> None:
+    list_rule = sigma_to_rule(
+        parse_sigma_yaml(
+            """\
+title: T
+detection:
+  selection:
+    - 'rm /var/log/syslog'
+    - 'mv /var/log/syslog'
+  condition: selection
+"""
+        )
+    )
+    all_rule = sigma_to_rule(
+        parse_sigma_yaml(
+            """\
+title: T
+detection:
+  keywords:
+    '|all': [truncate, '-s']
+  condition: keywords
+"""
+        )
+    )
+    assert list_rule.selection == {
+        "raw.message": {"contains_any": ["rm /var/log/syslog", "mv /var/log/syslog"]}
+    }
+    assert all_rule.selection == {"raw.message": {"contains_all": ["truncate", "-s"]}}
+
+
+def test_all_of_selection_wildcard_requires_every_block() -> None:
+    text = """\
+title: T
+detection:
+  selection_action:
+    Action|contains: powershell
+  selection_user:
+    User: alice
+  condition: all of selection_*
+"""
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+    assert rule.selection == {"action": {"contains": "powershell"}, "user": "alice"}
+
+
+def test_boolean_condition_honors_and_before_or() -> None:
+    text = """\
+title: T
+detection:
+  selection_a:
+    Action: alpha
+  selection_b:
+    User: bob
+  selection_c:
+    Host: trusted
+  condition: selection_a or selection_b and selection_c
+"""
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+
+    def matches(action: str, user: str, host: str) -> bool:
+        event = normalize(
+            parse_raw_line(json.dumps({"category": "process", "action": action, "user": user, "host": host}))
+        )
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("alpha", "alice", "other") is True
+    assert matches("other", "bob", "trusted") is True
+    assert matches("other", "bob", "other") is False
+
+
+def test_not_one_of_filter_wildcard_excludes_any_matching_filter() -> None:
+    text = """\
+title: T
+detection:
+  selection:
+    Category: process
+  filter_main_user:
+    User: SYSTEM
+  filter_main_host:
+    Host: trusted
+  condition: selection and not 1 of filter_main_*
+"""
+    rule = sigma_to_rule(parse_sigma_yaml(text))
+
+    def matches(user: str, host: str) -> bool:
+        event = normalize(
+            parse_raw_line(json.dumps({"category": "process", "user": user, "host": host}))
+        )
+        return evaluate_rule(event, rule) is not None
+
+    assert matches("alice", "workstation") is True
+    assert matches("SYSTEM", "workstation") is False
+    assert matches("alice", "trusted") is False
 
 
 def test_unknown_level_defaults_to_informational() -> None:
