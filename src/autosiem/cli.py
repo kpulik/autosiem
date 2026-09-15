@@ -166,6 +166,9 @@ def main() -> None:
     poll.add_argument("--path", help="Connector path (a .jsonl file or a directory of .jsonl files); file-based connectors only")
     poll.add_argument("--url", help="Org/API base URL for API-native connectors, e.g. https://dev-123.okta.com")
     poll.add_argument("--org", help="Organization login for org-scoped connectors, e.g. github-api")
+    poll.add_argument("--bucket", help="S3 bucket for cloudtrail-api")
+    poll.add_argument("--prefix", help="S3 key prefix for cloudtrail-api, e.g. AWSLogs/<account>/CloudTrail/")
+    poll.add_argument("--region", help="AWS region of the bucket (cloudtrail-api, default us-east-1)")
     poll.add_argument("--tenant-id", help="Directory (tenant) GUID for entra-api")
     poll.add_argument("--client-id", help="Application (client) id for entra-api. The client SECRET is read from AUTOSIEM_ENTRA_CLIENT_SECRET, never from an argument.")
     poll.add_argument(
@@ -683,7 +686,7 @@ def _rules_with_state(rules_dir: str | Path, state: dict[str, bool]) -> list[Det
 #: Every flag that identifies WHICH remote source a connector talks to. The
 #: default cursor filename hashes all of them, so adding an org/tenant-scoped
 #: connector means adding its flag here or its state will collide with a peer's.
-_CONNECTOR_IDENTITY = ("url", "org", "tenant_id", "client_id")
+_CONNECTOR_IDENTITY = ("url", "org", "tenant_id", "client_id", "bucket", "prefix", "region")
 
 
 def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -699,6 +702,9 @@ def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
         config["url"] = args.url
     if getattr(args, "org", None):
         config["org"] = args.org
+    for flag in ("bucket", "prefix", "region"):
+        if getattr(args, flag, None):
+            config[flag] = getattr(args, flag)
     if getattr(args, "tenant_id", None):
         config["tenant_id"] = args.tenant_id
     if getattr(args, "client_id", None):

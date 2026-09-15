@@ -1,0 +1,74 @@
+{
+  "access_key": "AKIAIOSFODNN7EXAMPLE",
+  "secret_key": "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+  "generated_by": "botocore 1.43.95",
+  "note": "Reference values from AWS's own botocore S3SigV4Auth. Regenerate with scratchpad/gen_vectors.py; botocore is never a project dependency.",
+  "cases": [
+    {
+      "label": "s3_list_objects_v2",
+      "method": "GET",
+      "url": "https://cloudtrail-logs.s3.us-east-1.amazonaws.com/?list-type=2&max-keys=100&prefix=AWSLogs%2F123456789012%2FCloudTrail%2F",
+      "region": "us-east-1",
+      "service": "s3",
+      "session_token": "",
+      "amz_date": "20260915T215649Z",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260915/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=118f6b43bf0f1efe8270ef0a68acd3dc26ff729d96f6c638fbff939415a2c679"
+    },
+    {
+      "label": "s3_get_object_nested_key",
+      "method": "GET",
+      "url": "https://cloudtrail-logs.s3.us-east-1.amazonaws.com/AWSLogs/123456789012/CloudTrail/us-east-1/2026/09/15/file_20260915T1200Z.json.gz",
+      "region": "us-east-1",
+      "service": "s3",
+      "session_token": "",
+      "amz_date": "20260915T215649Z",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260915/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=4f0b0ff305b46cedacd2f1d8d5993a3df796af123d8243ede2f118d4a0d54a1f"
+    },
+    {
+      "label": "s3_with_session_token",
+      "method": "GET",
+      "url": "https://cloudtrail-logs.s3.eu-west-1.amazonaws.com/?list-type=2",
+      "region": "eu-west-1",
+      "service": "s3",
+      "session_token": "FQoGZXIvYXdzEXAMPLETOKEN",
+      "amz_date": "20260915T215649Z",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260915/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date;x-amz-security-token, Signature=b93e7c2efff33fb6b6bd9f8492bbb9bb4282966d3113317f521ac067eefef84f"
+    },
+    {
+      "label": "s3_key_with_spaces_and_plus",
+      "method": "GET",
+      "url": "https://cloudtrail-logs.s3.us-east-1.amazonaws.com/AWSLogs/a%20b/c%2Bd/file.json.gz",
+      "region": "us-east-1",
+      "service": "s3",
+      "session_token": "",
+      "amz_date": "20260915T215649Z",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260915/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=a62dfaa3f61005b29ae95606b226a0aa6df986fdd367a3ec6890ad95a5faf2b2"
+    },
+    {
+      "label": "s3_continuation_token_needs_encoding",
+      "method": "GET",
+      "url": "https://cloudtrail-logs.s3.us-east-1.amazonaws.com/?continuation-token=1%2FabC%2B%3Dxyz&list-type=2",
+      "region": "us-east-1",
+      "service": "s3",
+      "session_token": "",
+      "amz_date": "20260915T215649Z",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260915/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=bae0c6d023176f6b37f83cd843a9eba7c64c018023947cd920ef80a3b9ce60ad"
+    },
+    {
+      "label": "s3_root_no_query",
+      "method": "GET",
+      "url": "https://cloudtrail-logs.s3.us-east-1.amazonaws.com/",
+      "region": "us-east-1",
+      "service": "s3",
+      "session_token": "",
+      "amz_date": "20260915T215649Z",
+      "content_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "authorization": "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260915/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=a8710b72e6487a6a030cf8efdec1358fc6ffc3177a24a274f2bf267b1510e027"
+    }
+  ]
+}
