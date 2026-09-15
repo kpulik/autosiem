@@ -349,20 +349,47 @@ def github_to_raw(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _entra_outcome(record: dict[str, Any]) -> tuple[str, str | None]:
+    """Classify an Entra sign-in as success/failure, and keep the raw code.
+
+    Entra reports ``resultType`` as a *numeric* code in a string: ``"0"`` is
+    success and anything else is a failure reason (50126 bad password, 50053
+    account locked, ...). Matching those against the words "fail"/"denied"
+    classified every real failed sign-in as a successful login, so
+    AUTO-AUTH-001 never fired on Entra data - and because the raw code was
+    passed straight through as ``outcome``, AUTO-CRED-001 never fired either,
+    since "0" is not "success". Text values are still understood, because
+    ``status.failureReason`` and hand-written exports use words.
+    """
+    raw = record.get("resultType")
+    if raw is None:
+        raw = record.get("result")
+    if raw is None or str(raw).strip() == "":
+        return "unknown", None
+    text = str(raw).strip()
+    code = text if text.lstrip("-").isdigit() else None
+    if code is not None:
+        return ("success" if code.lstrip("-") == "0" else "failure"), code
+    lowered = text.lower()
+    if any(word in lowered for word in ("fail", "denied", "error", "notapply")):
+        return "failure", text
+    if "success" in lowered:
+        return "success", text
+    return lowered, text
+
+
 def entra_to_raw(record: dict[str, Any]) -> dict[str, Any]:
     """Map a Microsoft Entra ID sign-in log to the normalized raw-event shape.
 
     ``createdDateTime/activityDateTime``→timestamp, ``userPrincipalName``→user,
     ``resultType``→outcome, ``ipAddress``→src_ip, ``appDisplayName``→resource,
     ``deviceDetail.displayName``→host. A failed sign-in fires AUTO-AUTH-001 and a
-    success fires AUTO-CRED-001.
+    success fires AUTO-CRED-001. See :func:`_entra_outcome` for why the result
+    code is normalized rather than passed through.
     """
-    result = str(record.get("resultType") or record.get("result") or "unknown").lower()
+    result, result_code = _entra_outcome(record)
     device = (record.get("deviceDetail") or {}).get("displayName")
-    if "fail" in result or "denied" in result or "error" in result or "notApply" in result:
-        action = "login_failed"
-    else:
-        action = "login"
+    action = "login_failed" if result == "failure" else "login"
     return {
         "format": "entra_signin",
         "category": "authentication",
@@ -378,6 +405,8 @@ def entra_to_raw(record: dict[str, Any]) -> dict[str, Any]:
         "host": device,
         "cloud_account": record.get("tenantId") or record.get("userId"),
         "outcome": result,
+        # The analyst still wants 50126 vs 50053; the rules want success/failure.
+        "result_code": result_code,
         "entra_event": record,
     }
 
@@ -865,6 +894,32 @@ GITHUB_SEEN_IDS = 1000
 GITHUB_ID_FIELD = "_document_id"
 
 
+def _filter_seen(records: list[dict[str, Any]], id_field: str,
+                 seen: list[str], cap: int) -> list[dict[str, Any]]:
+    """Drop records already delivered and remember the new ones, in place.
+
+    Needed by any API that stops issuing a cursor once you are caught up: the
+    only resume point left is the last cursor, which overlaps the final page.
+    Records with no id are never dropped, because a missing id cannot prove a
+    duplicate and losing a real event is worse than delivering one twice.
+    """
+    known = set(seen)
+    fresh = []
+    for record in records:
+        identifier = record.get(id_field)
+        if identifier is None:
+            fresh.append(record)
+            continue
+        identifier = str(identifier)
+        if identifier in known:
+            continue
+        known.add(identifier)
+        seen.append(identifier)
+        fresh.append(record)
+    del seen[:-cap]
+    return fresh
+
+
 class GitHubApiConnector(BaseConnector):
     """Polls the GitHub organization audit log API directly (no file export).
 
@@ -1023,22 +1078,7 @@ class GitHubApiConnector(BaseConnector):
         raise RuntimeError("GitHub API request exhausted its retries")
 
     def _unseen(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Drop records already delivered, and remember the ones that are new."""
-        known = set(self._seen)
-        fresh = []
-        for record in records:
-            identifier = record.get(GITHUB_ID_FIELD)
-            if identifier is None:
-                fresh.append(record)
-                continue
-            identifier = str(identifier)
-            if identifier in known:
-                continue
-            known.add(identifier)
-            self._seen.append(identifier)
-            fresh.append(record)
-        del self._seen[:-GITHUB_SEEN_IDS]
-        return fresh
+        return _filter_seen(records, GITHUB_ID_FIELD, self._seen, GITHUB_SEEN_IDS)
 
     # -- BaseConnector -----------------------------------------------------
     def parse(self, raw: str) -> dict[str, Any]:
@@ -1109,6 +1149,320 @@ def _github_backoff_seconds(headers: dict[str, str], attempt: int) -> float:
     return min(float(2 ** (attempt - 1)), GITHUB_MAX_BACKOFF_SECONDS)
 
 
+#: Microsoft identity platform token host.
+ENTRA_LOGIN_URL = "https://login.microsoftonline.com"
+#: Microsoft Graph API base.
+ENTRA_GRAPH_URL = "https://graph.microsoft.com/v1.0"
+#: Client-credentials scope: the app's own application permissions.
+ENTRA_SCOPE = "https://graph.microsoft.com/.default"
+#: Page size. Graph caps $top at 1000 for signIns but 100 keeps pages small.
+ENTRA_DEFAULT_TOP = 100
+#: Safety bound on pages followed in a single poll.
+ENTRA_DEFAULT_MAX_PAGES = 10
+#: How far back a first-ever poll reaches when no cursor exists yet.
+ENTRA_DEFAULT_LOOKBACK_HOURS = 24
+#: Attempts for a rate-limited or transient request before giving up.
+ENTRA_MAX_RETRIES = 3
+#: Never sleep longer than this on a 429, however far out Retry-After is.
+ENTRA_MAX_BACKOFF_SECONDS = 60.0
+#: Recently delivered sign-in ids kept to suppress the replay window.
+ENTRA_SEEN_IDS = 1000
+#: Sign-in records carry a stable GUID here.
+ENTRA_ID_FIELD = "id"
+#: Refresh this many seconds before the token actually expires, so a long page
+#: fetch cannot start with a valid token and finish with an expired one.
+ENTRA_TOKEN_SKEW_SECONDS = 60.0
+
+
+class EntraApiConnector(BaseConnector):
+    """Polls Microsoft Entra ID sign-in logs from Graph (no file export step).
+
+    Config:
+      ``tenant_id``      directory (tenant) GUID, required
+      ``client_id``      app registration's application (client) id, required
+      ``client_secret``  prefer ``client_secret_env`` so it stays out of argv
+      ``client_secret_env`` env var holding the secret (default
+                         ``AUTOSIEM_ENTRA_CLIENT_SECRET``)
+      ``url``            Graph base (default ``https://graph.microsoft.com/v1.0``)
+      ``login_url``      token host (default ``https://login.microsoftonline.com``)
+      ``state_path``     where the cursor and seen-id window are persisted
+      ``top``            page size (default 100)
+      ``max_pages``      pages per poll (default 10)
+      ``lookback_hours`` how far back the very first poll reaches (default 24)
+
+    This is the first connector that has to *obtain* a credential rather than
+    just carry one. Okta and GitHub take a long-lived token from the
+    environment; Entra takes a client id and secret, exchanges them for an
+    access token that expires in about an hour, and must refresh it mid-run.
+    The token is fetched on demand, cached against a monotonic clock, and
+    renewed ``ENTRA_TOKEN_SKEW_SECONDS`` early so a token cannot pass the check
+    at the start of a page fetch and expire before the request lands. A 401 is
+    still treated as a possible expiry and retried exactly once with a fresh
+    token, because the clock is not authoritative -- the token can be revoked.
+
+    Graph also paginates differently from both existing connectors: the next
+    URL is ``@odata.nextLink`` *in the response body*, not an RFC 5988 Link
+    header. Like GitHub it stops issuing one when you catch up, so the same
+    bounded seen-id window suppresses the replay that the overlapping cursor
+    would otherwise cause.
+
+    The ``auditLogs/signIns`` endpoint needs an Entra ID P1 or P2 licence and
+    the ``AuditLog.Read.All`` application permission with admin consent. A 403
+    naming ``signIns`` usually means the licence, not the permission grant.
+    """
+
+    name = "entra-api"
+    mapper = staticmethod(entra_to_raw)
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        super().__init__(config)
+        self.tenant_id = str(self.config.get("tenant_id") or "").strip()
+        self.client_id = str(self.config.get("client_id") or "").strip()
+        self.secret_env = str(self.config.get("client_secret_env")
+                              or self.config.get("token_env") or "AUTOSIEM_ENTRA_CLIENT_SECRET")
+        self._secret = self.config.get("client_secret") or os.environ.get(self.secret_env)
+        self.base_url = str(self.config.get("url") or ENTRA_GRAPH_URL).rstrip("/")
+        self.login_url = str(self.config.get("login_url") or ENTRA_LOGIN_URL).rstrip("/")
+        requested = self.config.get("top") or self.config.get("limit") or ENTRA_DEFAULT_TOP
+        self.top = min(int(requested), 1000)
+        self.max_pages = int(self.config.get("max_pages") or ENTRA_DEFAULT_MAX_PAGES)
+        self.lookback_hours = int(self.config.get("lookback_hours") or ENTRA_DEFAULT_LOOKBACK_HOURS)
+        raw_state = self.config.get("state_path")
+        self.state_path: Path | None = Path(raw_state) if raw_state else None
+        # Injected in tests; production uses urllib. The token exchange is a
+        # form POST, so it cannot share the GET transport the others use.
+        self._transport: Callable[[str, dict[str, str]], tuple[int, dict[str, str], str]] = (
+            self.config.get("transport") or _urllib_get
+        )
+        self._token_transport: Callable[
+            [str, dict[str, str], dict[str, str]], tuple[int, dict[str, str], str]
+        ] = self.config.get("token_transport") or _urllib_post_form
+        self._sleep: Callable[[float], None] = self.config.get("sleep") or time.sleep
+        self._clock: Callable[[], float] = self.config.get("clock") or time.monotonic
+        self._cursor: str | None = None
+        self._seen: list[str] = []
+        self._state_loaded = False
+        self._token: str | None = None
+        self._token_expires_at = 0.0
+
+    # -- credentials -------------------------------------------------------
+    def _require_config(self) -> str:
+        if not self.tenant_id or not self.client_id:
+            raise ConnectorAuthError("Entra needs both tenant_id and client_id")
+        if not self._secret:
+            raise ConnectorAuthError(
+                f"no Entra client secret: set {self.secret_env} or pass client_secret in the connector config"
+            )
+        return str(self._secret)
+
+    def _fetch_token(self) -> str:
+        """Exchange the client credentials for an access token."""
+        secret = self._require_config()
+        url = require_https(
+            f"{self.login_url}/{urllib.parse.quote(self.tenant_id, safe='')}/oauth2/v2.0/token",
+            what="an Entra access token",
+        )
+        form = {
+            "grant_type": "client_credentials",
+            "client_id": self.client_id,
+            "client_secret": secret,
+            "scope": ENTRA_SCOPE,
+        }
+        headers = {"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "AutoSIEM"}
+        status, _response_headers, body = self._token_transport(url, headers, form)
+        if status in (400, 401, 403):
+            # The body carries error_description, which repeats the client id
+            # and sometimes the secret's thumbprint. Report the code only.
+            raise ConnectorAuthError(f"Entra rejected the client credentials ({status})")
+        if status >= 400:
+            raise RuntimeError(f"Entra token endpoint returned {status}")
+        try:
+            payload = json.loads(body)
+        except ValueError as exc:
+            raise RuntimeError(f"Entra token endpoint returned invalid JSON: {exc}") from exc
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not token:
+            raise ConnectorAuthError("Entra token response carried no access_token")
+        try:
+            lifetime = float(payload.get("expires_in") or 0)
+        except (TypeError, ValueError):
+            lifetime = 0.0
+        self._token = str(token)
+        # A missing or absurd lifetime means refresh on the next request rather
+        # than trusting a token we cannot reason about.
+        self._token_expires_at = self._clock() + max(lifetime - ENTRA_TOKEN_SKEW_SECONDS, 0.0)
+        return self._token
+
+    def _access_token(self, force: bool = False) -> str:
+        if force or not self._token or self._clock() >= self._token_expires_at:
+            return self._fetch_token()
+        return self._token
+
+    # -- cursor persistence ------------------------------------------------
+    def _load_state(self) -> None:
+        if self._state_loaded:
+            return
+        self._state_loaded = True
+        if not (self.state_path and self.state_path.exists()):
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        cursor = data.get("next")
+        self._cursor = str(cursor) if cursor else None
+        seen = data.get("seen")
+        if isinstance(seen, list):
+            self._seen = [str(item) for item in seen][-ENTRA_SEEN_IDS:]
+
+    def _save_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(
+                json.dumps({
+                    "next": self._cursor,
+                    "seen": self._seen[-ENTRA_SEEN_IDS:],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            # Losing the cursor costs a replay, not correctness; never fail a poll.
+            pass
+
+    def _start_url(self) -> str:
+        self._load_state()
+        if self._cursor:
+            return self._cursor
+        since = self.config.get("since")
+        if not since:
+            start = datetime.now(timezone.utc) - timedelta(hours=self.lookback_hours)
+            since = start.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        # ge rather than gt: two sign-ins can share a timestamp, and the
+        # seen-id window already removes the duplicate that ge lets through.
+        query = urllib.parse.urlencode({
+            "$top": self.top,
+            "$orderby": "createdDateTime",
+            "$filter": f"createdDateTime ge {since}",
+        })
+        return f"{self.base_url}/auditLogs/signIns?{query}"
+
+    # -- HTTP --------------------------------------------------------------
+    def _request(self, url: str) -> tuple[list[dict[str, Any]], str | None]:
+        """One page, refreshing an expired token and backing off on throttling."""
+        target = require_https(url, what="Entra sign-in logs")
+        refreshed = False
+        for attempt in range(1, ENTRA_MAX_RETRIES + 1):
+            headers = {
+                "Authorization": f"Bearer {self._access_token()}",
+                "Accept": "application/json",
+                "User-Agent": "AutoSIEM",
+            }
+            status, response_headers, body = self._transport(target, headers)
+            lowered = {key.lower(): value for key, value in response_headers.items()}
+            if status == 401 and not refreshed:
+                # The clock is not authoritative: a token can be revoked before
+                # it expires. Spend exactly one retry finding out.
+                refreshed = True
+                self._access_token(force=True)
+                continue
+            if status == 429 or 500 <= status < 600:
+                if attempt == ENTRA_MAX_RETRIES:
+                    raise RuntimeError(f"Graph API returned {status} after {attempt} attempts")
+                self._sleep(_entra_backoff_seconds(lowered, attempt))
+                continue
+            if status in (401, 403):
+                raise ConnectorAuthError(
+                    f"Graph API rejected the request ({status}); auditLogs/signIns needs "
+                    "AuditLog.Read.All with admin consent and an Entra ID P1/P2 licence"
+                )
+            if status >= 400:
+                raise RuntimeError(f"Graph API returned {status}")
+            try:
+                payload = json.loads(body) if body.strip() else {}
+            except ValueError as exc:
+                raise RuntimeError(f"Graph API returned invalid JSON: {exc}") from exc
+            if not isinstance(payload, dict):
+                raise RuntimeError("Graph API returned a non-object payload")
+            value = payload.get("value")
+            records = [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+            next_link = payload.get("@odata.nextLink")
+            return records, str(next_link) if next_link else None
+        raise RuntimeError("Graph API request exhausted its retries")
+
+    # -- BaseConnector -----------------------------------------------------
+    def parse(self, raw: str) -> dict[str, Any]:
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("connector record must be a JSON object")
+        return self.mapper(value)
+
+    def poll(self) -> list[dict[str, Any]]:
+        if not (self.tenant_id and self.client_id):
+            self.last_error = "no Entra tenant_id/client_id configured"
+            return self._record([])
+        events: list[dict[str, Any]] = []
+        url: str | None = self._start_url()
+        try:
+            for _ in range(self.max_pages):
+                if not url:
+                    break
+                records, next_url = self._request(url)
+                fresh = _filter_seen(records, ENTRA_ID_FIELD, self._seen, ENTRA_SEEN_IDS)
+                events.extend(self.mapper(record) for record in fresh)
+                # Keep the last cursor when Graph stops sending one: it is the
+                # only resume point we have, and the seen window covers the overlap.
+                if next_url:
+                    self._cursor = next_url
+                if not records:
+                    break
+                url = next_url
+            self.last_error = None
+        except ConnectorAuthError as exc:
+            self.last_error = str(exc)
+        except (InsecureURLError, RuntimeError, urllib.error.URLError, OSError) as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+        self._save_state()
+        return self._record(events)
+
+
+def _entra_backoff_seconds(headers: dict[str, str], attempt: int) -> float:
+    """Seconds to wait before retrying. Graph sends Retry-After in seconds."""
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), ENTRA_MAX_BACKOFF_SECONDS)
+        except ValueError:
+            pass
+    return min(float(2 ** (attempt - 1)), ENTRA_MAX_BACKOFF_SECONDS)
+
+
+def _urllib_post_form(url: str, headers: dict[str, str],
+                      form: dict[str, str]) -> tuple[int, dict[str, str], str]:
+    """Stdlib form POST returning ``(status, headers, body)``; no third-party deps.
+
+    Separate from :func:`_urllib_get` because an OAuth token exchange is the
+    only place a connector sends a body, and widening the GET signature would
+    touch every connector that does not need it.
+    """
+    data = urllib.parse.urlencode(form).encode("utf-8")
+    request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request) as response:
+            return response.status, dict(response.headers.items()), response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8")
+        except Exception:
+            pass
+        return exc.code, dict(exc.headers.items() if exc.headers else {}), body
+
+
 class ConnectorRegistry:
     """Name -> connector factory, so the CLI/API can drive any connector."""
 
@@ -1140,3 +1494,4 @@ registry.register(SuricataConnector.name, SuricataConnector)
 registry.register(AssetConnector.name, AssetConnector)
 registry.register(OktaApiConnector.name, OktaApiConnector)
 registry.register(GitHubApiConnector.name, GitHubApiConnector)
+registry.register(EntraApiConnector.name, EntraApiConnector)

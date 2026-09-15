@@ -267,6 +267,38 @@ def test_entra_maps_and_fires(tmp_path: Path) -> None:
     assert isinstance(registry.create("entra", {"path": "/tmp"}), EntraConnector)
 
 
+def test_entra_numeric_result_codes_decide_success_and_failure(tmp_path: Path) -> None:
+    """resultType is a numeric code, not a word: "0" succeeds, 50126 fails.
+
+    Matching those against "fail"/"denied" classified every real failed sign-in
+    as a successful login, and passing the code through as `outcome` meant
+    neither AUTO-AUTH-001 nor AUTO-CRED-001 could match Entra data at all.
+    """
+    failed = entra_to_raw({"createdDateTime": "2026-08-04T10:08:00Z", "id": "i1",
+                           "userPrincipalName": "alice@x.com", "ipAddress": "198.51.100.25",
+                           "resultType": "50126"})
+    assert failed["action"] == "login_failed"
+    assert failed["outcome"] == "failure"
+    assert failed["result_code"] == "50126"
+
+    ok = entra_to_raw({"createdDateTime": "2026-08-04T10:09:00Z", "id": "i2",
+                       "userPrincipalName": "alice@x.com", "ipAddress": "198.51.100.25",
+                       "resultType": "0"})
+    assert ok["action"] == "login"
+    assert ok["outcome"] == "success"
+
+    absent = entra_to_raw({"createdDateTime": "2026-08-04T10:10:00Z", "id": "i3"})
+    assert absent["outcome"] == "unknown"
+    assert absent["result_code"] is None
+
+    root = Path(__file__).resolve().parents[1]
+    rules = load_rules(root / "rules")
+    result = AutoSIEMPipeline(rules).process_lines([json.dumps(failed), json.dumps(ok)])
+    fired = {f.rule_id for f in result.findings}
+    assert "AUTO-AUTH-001" in fired   # the numeric failure code
+    assert "AUTO-CRED-001" in fired   # the numeric success code
+
+
 def test_sysmon_dict_fires_cred_dump(tmp_path: Path) -> None:
     source = tmp_path / "sysmon.jsonl"
     sysmon = {"Event": {"System": {"EventID": 1, "EventRecordID": 41, "UtcTime": "2026-08-04T10:08:00Z", "Computer": "alice-pc"}, "EventData": {"Image": "C:\\Tools\\mimikatz.exe", "CommandLine": "mimikatz.exe sekurlsa::logonpasswords", "OriginalFileName": "mimikatz.exe", "ParentImage": "C:\\Windows\\explorer.exe", "ParentCommandLine": "explorer.exe", "IntegrityLevel": "High"}}}
