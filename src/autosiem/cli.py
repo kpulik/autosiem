@@ -10,7 +10,7 @@ from typing import Any
 
 from .pipeline import AutoSIEMPipeline, PipelineResult
 from .rbac import ROLE_PERMISSIONS, ROLES, Rbac
-from .storage import DEFAULT_DB_PATH, DEFAULT_TENANT, AutoSIEMStorage
+from .storage import DEFAULT_DB_PATH, DEFAULT_TENANT, RelationalStorage, open_storage
 from .llm import LLMService, config_from_env
 from .suppression import DEFAULT_CREATED_BY, VALID_ACTIONS, Suppression, SuppressionEngine
 from .coverage import coverage_report
@@ -263,14 +263,28 @@ def main() -> None:
     users.add_argument("--tenant", default="default", help="Tenant label")
     users.add_argument("--token", help="API token to assign (stored as a sha256 hash)")
 
+    sub.add_parser("migrate", help="Explicitly apply PostgreSQL forward migrations")
+    outbox = sub.add_parser("outbox", help="PostgreSQL projection backlog or bounded delivery")
+    outbox.add_argument("--deliver", action="store_true",
+                        help="Deliver pending records to the configured projection before reporting")
+    outbox.add_argument("--limit", type=int, default=100,
+                        help="Maximum records to deliver in one pass, 1-1000 (default: 100)")
+
     args = parser.parse_args()
+    if args.command in {"migrate", "outbox"}:
+        try:
+            _run_postgres_command(args)
+        except (ValueError, RuntimeError) as exc:
+            # postgres.py and projections.py raise curated, credential-free
+            # messages. A missing DSN or extra is operator configuration, not
+            # a crash, so report it the way an unconfigured LLM backend is.
+            raise SystemExit(str(exc)) from None
+        return
 
     if args.command in {"ingest", "demo", "poll"}:
-        store = None if args.no_save else AutoSIEMStorage(args.db)
+        store = None if args.no_save else open_storage(args.db)
         engine = load_suppression_engine(store) if store else None
-        result = _run_pipeline_command(args, suppression_engine=engine)
-        if store:
-            store.save_pipeline_result(result)
+        result = _run_pipeline_command(args, suppression_engine=engine, store=store)
         _print_pipeline_result(result, saved=store is not None, db=args.db)
         return
 
@@ -278,7 +292,7 @@ def main() -> None:
         _run_listener(args)
         return
 
-    store = AutoSIEMStorage(args.db)
+    store = open_storage(args.db)
     if args.command == "sources":
         _print_json(store.source_stats())
     elif args.command == "connectors":
@@ -473,7 +487,8 @@ def _run_distributed(args: argparse.Namespace) -> None:
         },
         "notes": [
             "Alternate backends store events only; findings, incidents, "
-            "investigations and the audit chain stay in SQLite.",
+            "investigations and the audit chain stay in the configured authority. "
+            "PostgreSQL delivers projections through the outbox command.",
             "AUTOSIEM_WORKERS applies only to library use of DistributedPipeline "
             "without an injected pipeline. CLI ingest and listen always inject "
             "the configured pipeline so suppressions, threat intel, RAG, SOAR "
@@ -482,7 +497,20 @@ def _run_distributed(args: argparse.Namespace) -> None:
     }
     if any(enabled.values()):
         rules = _rules_with_state(args.rules, _rule_state_from_db(args.db))
-        pipeline = DistributedPipeline(config, rules, db_path=str(args.db))
+        store = open_storage(args.db) if args.replay else None
+        configured = None
+        if store is not None:
+            configured = AutoSIEMPipeline(
+                rules, suppression_engine=load_suppression_engine(store),
+                threat_intel=_make_threat_intel(args), rag=default_rag_engine(store, tenant_id=DEFAULT_TENANT),
+                soar=SoarPlanner(), event_search=store, baseline_store=store, tenant_id=DEFAULT_TENANT,
+                enrichment=enrichment_from_env(indicators=load_intel_state(default_intel_state(args.db))),
+            )
+        pipeline = DistributedPipeline(
+            config, rules, db_path=str(args.db), pipeline=configured,
+            persist=store.save_pipeline_result if store else None,
+            transactional_outbox=os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres",
+        )
         if args.replay:
             payload["replay"] = pipeline.replay_from_queue()
         # Report stats after any replay so the numbers reflect the final state.
@@ -509,7 +537,7 @@ def _run_users(args: argparse.Namespace) -> None:
             _print_json({"error": str(exc)})
             return
         rbac.save(args.file)
-        store = AutoSIEMStorage(args.db)
+        store = open_storage(args.db)
         with store.connect() as conn:
             store.audit(conn, actor="cli", action="rbac_user_added", target=args.name, details={"role": user.role, "tenant": user.tenant})
         _print_json({"added": user.name, "role": user.role, "tenant": user.tenant, "token_hashed": bool(args.token), "file": args.file})
@@ -517,7 +545,7 @@ def _run_users(args: argparse.Namespace) -> None:
     if args.action == "remove":
         removed = rbac.remove_user(args.name)
         rbac.save(args.file)
-        store = AutoSIEMStorage(args.db)
+        store = open_storage(args.db)
         with store.connect() as conn:
             store.audit(conn, actor="cli", action="rbac_user_removed", target=args.name, details={})
         _print_json({"removed": removed, "name": args.name, "file": args.file})
@@ -532,7 +560,7 @@ def _run_users(args: argparse.Namespace) -> None:
             _print_json({"error": str(exc)})
             return
         rbac.save(args.file)
-        store = AutoSIEMStorage(args.db)
+        store = open_storage(args.db)
         with store.connect() as conn:
             store.audit(conn, actor="cli", action="rbac_token_rotated", target=args.name, details={})
         _print_json({"name": args.name, "new_token": new_token, "file": args.file})
@@ -543,7 +571,7 @@ def _run_users(args: argparse.Namespace) -> None:
             return
         revoked = rbac.revoke_token(args.name)
         rbac.save(args.file)
-        store = AutoSIEMStorage(args.db)
+        store = open_storage(args.db)
         with store.connect() as conn:
             store.audit(conn, actor="cli", action="rbac_token_revoked", target=args.name, details={})
         _print_json({"revoked": revoked, "name": args.name, "file": args.file})
@@ -568,10 +596,15 @@ def _make_llm(enable: bool) -> LLMService | None:
 
 def _add_storage_args(parser: argparse.ArgumentParser) -> None:
     _add_db_arg(parser)
-    parser.add_argument("--no-save", action="store_true", help="Do not persist pipeline output to SQLite")
+    parser.add_argument("--no-save", action="store_true", help="Do not persist pipeline output to the configured store")
 
 
-def _run_pipeline_command(args: argparse.Namespace, suppression_engine: SuppressionEngine | None = None) -> PipelineResult:
+def _run_pipeline_command(args: argparse.Namespace, suppression_engine: SuppressionEngine | None = None, store: RelationalStorage | None = None) -> PipelineResult:
+    def finish(result: PipelineResult) -> PipelineResult:
+        if store is not None:
+            store.save_pipeline_result(result)
+        return result
+
     llm = _make_llm(getattr(args, "llm", False))
     threat_intel = _make_threat_intel(args)
     rules = _rules_with_state(args.rules, _rule_state_from_db(args.db))
@@ -591,8 +624,8 @@ def _run_pipeline_command(args: argparse.Namespace, suppression_engine: Suppress
         # pipeline (archive -> queue -> process -> backend -> ack). Running the
         # standard pipeline as well would process every event twice.
         if dist_config.queue_enabled or dist_config.archive_enabled or dist_config.alternate_backend:
-            return DistributedPipeline(dist_config, rules, db_path=str(args.db), pipeline=pipeline).run(lines)
-        return pipeline.process_lines(lines)
+            return DistributedPipeline(dist_config, rules, db_path=str(args.db), pipeline=pipeline, persist=store.save_pipeline_result if store else None, transactional_outbox=os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres").run(lines)
+        return finish(pipeline.process_lines(lines))
     if args.command == "poll":
         connector = registry.create(args.connector, _connector_config(args))
         events = connector.poll()
@@ -601,13 +634,13 @@ def _run_pipeline_command(args: argparse.Namespace, suppression_engine: Suppress
             print(json.dumps({"connector": args.connector, "error": health.detail}, indent=2))
         lines = [json.dumps(event) for event in events]
         pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher)
-        return pipeline.process_lines(lines)
+        return finish(pipeline.process_lines(lines))
     # `demo` deliberately does NOT persist the behavioral baseline. Its events
     # carry fixed timestamps, so replaying them stacks several events onto the
     # same instant and trips the burst signal on every re-run. Real ingest paths
     # advance in time and do keep a warm baseline.
     lines = [json.dumps(event) for event in DEMO_EVENTS]
-    return AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, enrichment=enricher).process_lines(lines)
+    return finish(AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, enrichment=enricher).process_lines(lines))
 
 
 def _make_threat_intel(args: argparse.Namespace) -> ThreatIntelMatcher | None:
@@ -672,28 +705,32 @@ def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
     return config
 
 
-def _event_search_from_db(db: str | Path) -> AutoSIEMStorage | None:
+def _event_search_from_db(db: str | Path) -> RelationalStorage | None:
     """Read-only event searcher for the analyst runtime, or None if no DB yet.
 
     Deliberately does not create the database file: a first run has no history
     to pivot into, and creating it here would surprise ``--no-save``.
     """
+    if os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() != "sqlite":
+        return open_storage(db)
     path = Path(db)
     if not path.exists():
         return None
     try:
-        return AutoSIEMStorage(path)
+        return open_storage(path)
     except Exception:  # a corrupt db must not break a pipeline run
         return None
 
 
 def _rule_state_from_db(path: str | Path, tenant_id: str | None = None) -> dict[str, bool]:
     """Read persisted rule state without forcing the DB file into existence."""
+    if os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() != "sqlite":
+        return open_storage(path).rule_state_dict(tenant_id=tenant_id)
     p = Path(path)
     if not p.exists():
         return {}
     try:
-        return AutoSIEMStorage(p).rule_state_dict(tenant_id=tenant_id)
+        return open_storage(p).rule_state_dict(tenant_id=tenant_id)
     except Exception:  # corrupt/empty db should never break a pipeline run
         return {}
 
@@ -713,7 +750,7 @@ def _rule_to_dict(rule: DetectionRule) -> dict[str, Any]:
 
 def _run_listener(args: argparse.Namespace) -> None:
     llm = _make_llm(getattr(args, "llm", False))
-    store = None if args.no_save else AutoSIEMStorage(args.db)
+    store = None if args.no_save else open_storage(args.db)
     engine = load_suppression_engine(store) if store else None
     rules = _rules_with_state(args.rules, _rule_state_from_db(args.db))
     listener_store = _event_search_from_db(args.db)
@@ -734,7 +771,11 @@ def _run_listener(args: argparse.Namespace) -> None:
     dist_pipeline = None
     if dist_config.queue_enabled or dist_config.archive_enabled or dist_config.alternate_backend:
         # Wraps the same pipeline object, so each event is processed once.
-        dist_pipeline = DistributedPipeline(dist_config, rules, db_path=str(args.db), pipeline=pipeline)
+        dist_pipeline = DistributedPipeline(
+            dist_config, rules, db_path=str(args.db), pipeline=pipeline,
+            persist=store.save_pipeline_result if store else None,
+            transactional_outbox=os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres",
+        )
         # Replay any unacked messages from previous crash
         replay_result = dist_pipeline.replay_from_queue()
         if replay_result.get("replayed", 0) > 0:
@@ -743,7 +784,7 @@ def _run_listener(args: argparse.Namespace) -> None:
     def handle(raw: dict[str, Any]) -> None:
         line = json.dumps(raw)
         result = dist_pipeline.run([line]) if dist_pipeline else pipeline.process_lines([line])
-        if store:
+        if store and dist_pipeline is None:
             store.save_pipeline_result(result)
         for event in result.events:
             finding_count = sum(1 for finding in result.findings if finding.event_id == event.event_id)
@@ -764,7 +805,7 @@ def _run_listener(args: argparse.Namespace) -> None:
         server.stop()
 
 
-def load_suppression_engine(store: AutoSIEMStorage, tenant_id: str | None = None) -> SuppressionEngine | None:
+def load_suppression_engine(store: RelationalStorage, tenant_id: str | None = None) -> SuppressionEngine | None:
     tenant = tenant_id or DEFAULT_TENANT
     rows = store.list_suppressions(enabled_only=True, tenant_id=tenant)
     if not rows:
@@ -800,7 +841,7 @@ def _print_pipeline_result(result: PipelineResult, saved: bool, db: str) -> None
         "findings": len(result.findings),
         "suppressed": len(result.suppressed),
         "saved": saved,
-        "db": db if saved else None,
+        "db": ("postgres" if os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres" else db) if saved else None,
         "incidents": [
             {
                 "id": incident.incident_id,
@@ -857,6 +898,23 @@ def _investigation_summary(result: PipelineResult, incident_id: str) -> dict[str
             for proposal in investigation.action_proposals
         ],
     }
+
+
+def _run_postgres_command(args: argparse.Namespace) -> None:
+    """Run the PostgreSQL-only subcommands, which read their DSN from the environment."""
+    from .postgres import PostgresStorage, dsn_from_env, migrate
+    if args.command == "migrate":
+        _print_json({"applied": migrate(dsn_from_env())})
+        return
+    from .projections import projection_from_env
+    pg_store = PostgresStorage(dsn_from_env())
+    projection = projection_from_env()
+    # One document, so the backlog reported after --deliver stays pipeable.
+    report: dict[str, Any] = {}
+    if args.deliver:
+        report.update(pg_store.drain_outbox(projection.destination, projection.deliver, args.limit))
+    report.update(pg_store.outbox_stats(projection.destination))
+    _print_json(report)
 
 
 def _print_json(data: Any) -> None:

@@ -2,7 +2,7 @@
 
 ## Current status (2026-08-22)
 
-- **745 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
+- **746 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
 - **UEBA + incident correlation deepened (2026-08-08)**: `anomaly.py` now scores seven named behavioral signals (novel action / source IP / host, off-hours, population rarity, peer-group rarity, burst) against a per-tenant baseline persisted in SQLite, with warm-up gating and a per-signal explanation on every finding; `risk.py` correlates findings through a 24h-windowed entity graph so one incident spans user ↔ host ↔ IP ↔ cloud account and carries a time-ordered kill chain.
 - **16 detection rules** covering **20 MITRE ATT&CK techniques**. Measured against MITRE's published matrix (ATT&CK **19.2**, vendored as a distilled index): **20/697 techniques (2.9%)** and **15/222 parent techniques (6.8%)**, with a per-tactic breakdown and zero technique IDs that MITRE no longer publishes. The separate 15-technique curated watchlist is fully covered. The small percentage is the honest one — this is a demonstration rule set, not a production content library.
 - Demo `examples/events.jsonl` (15 events) runs a full kill-chain on profile `alice` → one critical incident (risk 1000) for which the AI runtime proposes containment (never auto-executes).
@@ -11,6 +11,7 @@
 - **Phase 4 copilot + the audit-chain/metrics parts of Phase 3 are now WIRED**, **multi-tenant RBAC is implemented + wired** (`src/autosiem/rbac.py`, CLI `users`, RBAC token guard in the API), and **the Phase-3 distributed pipeline is wired** (`src/autosiem/distributed.py` — durable queue, workers, archive, ClickHouse/OpenSearch backends, all opt-in via `AUTOSIEM_*` env vars on `cli ingest`/`listen`). A first-alpha security review + High hardening (SEC-001..SEC-004) completed now lives in `docs/security-review.md`.
 - **RBAC depth is now shipped**: per-tenant row isolation on the data plane (`tenant_id` on events/findings/incidents/investigations/action_proposals), token rotation + revocation (CLI `users rotate|revoke`, `POST /api/users/{name}/rotate-token|revoke-token`), and a full user-management audit trail written into the hash-chained audit log.
 - **Control-plane tenancy is now shipped**: `rule_state` and `suppressions` are tenant-scoped too, so one tenant's analyst disabling a rule or adding a suppression no longer affects every other tenant.
+- **Optional PostgreSQL control plane implemented**: [ADR-0001](adr/0001-postgres-control-plane.md) now has explicit migrations, transactional event outbox, concurrent case-write tests, and tenant-safe keys. SQLite remains the local default. [Deployment limits](postgresql.md) distinguish tested control-plane concurrency from still-unimplemented HA ingestion and external archive recovery.
 
 ## Phase 0 — MVP core
 
@@ -82,6 +83,8 @@ See `docs/deployment-and-collection.md` for how companies deploy AutoSIEM and ge
 - [x] Object archive — `autosiem.archive` (append-only `JournalFile`, `ArchiveWriter`); wired via `AUTOSIEM_ARCHIVE_PATH` env var.
 - [x] Backpressure and replay — `DurableQueue` enforces `max_pending`, replays unacked messages on restart; wired into distributed pipeline.
 - [x] ClickHouse/OpenSearch storage — `autosiem.backends` (`EventBackend` + `make_backend`); configurable via `AUTOSIEM_BACKEND` env var.
+- [x] Storage ports for the future control plane and event-query implementations (`autosiem.storage_ports`); SQLite explicitly satisfies the initial contracts.
+- [x] Optional PostgreSQL control plane and transactional event outbox: explicit forward migrations, idempotent projection contracts, replay/lag reporting, and real PostgreSQL concurrency tests. Production HA, raw archive recovery, and live external projection-cluster verification remain open; see [deployment guide](postgresql.md).
 - [x] Kafka/Redpanda/NATS bus — `autosiem.bus.KafkaBus` (optional, requires `kafka-python`); available for production message bus.
 - [x] Multi-tenant RBAC — `autosiem.rbac`: roles `admin` (everything), `analyst` (triage + approvals + rule management), `ingest` (machine accounts: ingest only), `viewer` (read-only); per-endpoint permission checks enforced on `/api/*`; user store keyed by **hashed** tokens (no plaintext). CLI `users` (list/add/remove/rotate/revoke/roles) + `AUTOSIEM_RBAC_FILE` bearer guard, with the legacy single-token `AUTOSIEM_API_TOKEN` retained as the fallback when no users file is configured. First-alpha review: `docs/security-review.md`.
 - [x] **Per-tenant data isolation** — every data-plane table (`events`, `findings`, `incidents`, `investigations`, `action_proposals`) carries an indexed `tenant_id`, back-filled to `default` by an automatic migration. In RBAC mode each request is scoped to the authenticated user's tenant on both read *and* write, so a cross-tenant fetch returns **404 rather than 403** (no existence probing). Unscoped calls (the CLI, and legacy single-token mode) keep seeing every row, so single-tenant deployments are unaffected.

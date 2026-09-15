@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from .policy import DEFAULT_NOTIFY_CHANNEL, AutomationPolicy, ConfidenceSource
 from .schemas import Finding, Incident, Severity
+from .storage_ports import EventQueryStore
 
 #: Events pulled per entity when the runtime searches for related telemetry.
 DEFAULT_RELATED_EVENT_LIMIT = 25
@@ -27,7 +28,7 @@ def _highest_label(levels: list[str]) -> str | None:
 
 
 @runtime_checkable
-class EventSearcher(Protocol):
+class EventSearcher(EventQueryStore, Protocol):
     """Anything that can look up stored events for an entity.
 
     ``AutoSIEMStorage`` satisfies this. Supplying one makes the runtime's
@@ -35,13 +36,7 @@ class EventSearcher(Protocol):
     what it would do.
     """
 
-    def search_events(
-        self,
-        query: str | None = ...,
-        entity: str | None = ...,
-        limit: int = ...,
-        tenant_id: str | None = ...,
-    ) -> list[dict[str, Any]]: ...
+    pass
 
 
 class TaskStatus(str, Enum):

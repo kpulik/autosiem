@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -106,9 +107,9 @@ class AutoSIEMPipeline:
             self.baseline_store.save_baseline(
                 self.anomaly_detector.state.to_dict(), tenant_id=self.tenant_id
             )
-        except Exception:
+        except Exception as exc:
             # Losing a baseline update is recoverable; failing the run is not.
-            pass
+            logging.getLogger(__name__).warning("Behavioral baseline update not saved (%s)", type(exc).__name__)
 
     def process_lines(self, lines: list[str]) -> PipelineResult:
         result = PipelineResult()

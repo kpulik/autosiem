@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .schemas import Incident
+from .storage_ports import IncidentQueryStore
 
 _STOPWORDS = frozenset(
     {
@@ -67,7 +68,7 @@ def incident_doc(row: dict[str, Any]) -> str:
 
 
 def default_rag_engine(
-    store: Any | None = None,
+    store: IncidentQueryStore | None = None,
     tenant_id: str | None = None,
     incident_limit: int = DEFAULT_INCIDENT_LIMIT,
 ) -> "RagEngine":
