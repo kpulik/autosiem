@@ -2,12 +2,12 @@
 {
   "id": "AUTO-DEFEV-003",
   "name": "Source branch protection removed or overridden",
-  "description": "Detects removal or override of branch protection in a SaaS SCM audit log (GitHub protected_branch.destroy / policy_override / rejected_ref_update). Branch protection is what forces review before code ships, so disabling it is the step that makes a malicious commit reachable. Overrides by release automation are common; allowlist those actors rather than lowering the severity.",
+  "description": "Detects removal or override of branch protection in a SaaS SCM audit log (GitHub protected_branch.destroy / policy_override). Branch protection is what forces review before code ships, so disabling it is the step that makes a malicious commit reachable. Deliberately excludes protected_branch.rejected_ref_update, which is the control WORKING: a push was blocked. Alerting HIGH on a successful block trains analysts to ignore the rule. Overrides by release automation are common; allowlist those actors rather than lowering the severity.",
   "severity": "high",
   "risk_points": 65,
   "selection": {
     "category": "cloud",
-    "action": {"contains_any": ["protected_branch.destroy", "protected_branch.policy_override", "protected_branch.rejected_ref_update", "branch_protection_rule.destroy"]}
+    "action": {"contains_any": ["protected_branch.destroy", "protected_branch.policy_override", "branch_protection_rule.destroy"]}
   },
   "mitre_attack": ["T1484"],
   "tags": ["cloud", "scm", "defense-impairment", "policy"]

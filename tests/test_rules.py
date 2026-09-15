@@ -108,6 +108,9 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
         "silent": [
             {"category": "cloud", "action": "protected_branch.create", "user": "alice", "cloud_account": "acme", "resource": "acme/payments"},
             {"category": "cloud", "action": "repo.destroy", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
+            # The control WORKING: a push was blocked. Alerting HIGH on a
+            # successful block is how a rule gets tuned out.
+            {"category": "cloud", "action": "protected_branch.rejected_ref_update", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
         ],
     },
     "AUTO-IMPACT-003": {

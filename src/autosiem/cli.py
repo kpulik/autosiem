@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -679,6 +680,12 @@ def _rules_with_state(rules_dir: str | Path, state: dict[str, bool]) -> list[Det
     return rules
 
 
+#: Every flag that identifies WHICH remote source a connector talks to. The
+#: default cursor filename hashes all of them, so adding an org/tenant-scoped
+#: connector means adding its flag here or its state will collide with a peer's.
+_CONNECTOR_IDENTITY = ("url", "org", "tenant_id", "client_id")
+
+
 def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
     """Build a connector config from the poll flags, omitting unset values.
 
@@ -707,9 +714,15 @@ def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
     state = getattr(args, "state", None)
     if state:
         config["state_path"] = state
-    elif getattr(args, "url", None) or getattr(args, "org", None) or getattr(args, "tenant_id", None):
+    elif any(getattr(args, name, None) for name in _CONNECTOR_IDENTITY):
         # Default the cursor next to the database so restarts resume cleanly.
-        config["state_path"] = str(Path(args.db).parent / f"{args.connector}_cursor.json")
+        # Keyed on the full source identity, not just the connector name: two
+        # orgs or tenants polled into one --db otherwise shared a cursor AND a
+        # seen-id window, so the second source resumed from the first's cursor
+        # and had its records suppressed as already-delivered. Silent event loss.
+        identity = "|".join(str(getattr(args, name, "") or "") for name in _CONNECTOR_IDENTITY)
+        digest = hashlib.sha256(f"{args.connector}|{identity}".encode("utf-8")).hexdigest()[:12]
+        config["state_path"] = str(Path(args.db).parent / f"{args.connector}_{digest}_cursor.json")
     return config
 
 
