@@ -416,6 +416,23 @@ def entra_to_raw(record: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _event_code(value: Any) -> Any:
+    """Coerce a Windows EventID to int so XML and JSON events match alike.
+
+    The XML parser leaves `<EventID>1</EventID>` as the string "1" while a JSON
+    Sysmon event carries the int 1, and Sigma compiles `EventID: 1` to an int.
+    Scalar matching is type-sensitive, so XML events silently failed every
+    numeric EventID rule that JSON events matched. Non-numeric values (a named
+    channel, an empty tag) pass through untouched.
+    """
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    return int(text) if text.lstrip("-").isdigit() else value
+
+
 def _sysmon_dict(rec: dict[str, Any]) -> dict[str, Any]:
     """Normalize a Sysmon JSON / Winlogbeat event-dict from client-shaped input."""
     event_raw = rec.get("Event")
@@ -429,7 +446,7 @@ def _sysmon_dict(rec: dict[str, Any]) -> dict[str, Any]:
     parent = ed.get("ParentImage") or system.get("ParentImage") or rec.get("ParentImage")
     utc = system.get("UtcTime") or ed.get("UtcTime") or rec.get("UtcTime")
     computer = system.get("Computer") or rec.get("Computer")
-    event_code = system.get("EventID") or rec.get("EventID")
+    event_code = _event_code(system.get("EventID") or rec.get("EventID"))
     event_id = system.get("EventRecordID") or rec.get("EventRecordID")
     provider_raw = system.get("Provider") or rec.get("ProviderName")
     provider = provider_raw.get("Name") if isinstance(provider_raw, dict) else provider_raw
@@ -491,7 +508,7 @@ def _sysmon_xml(text: str) -> dict[str, Any]:
         "log_service": "sysmon",
         "timestamp": system.get("UtcTime") or data.get("UtcTime"),
         "event_id": system.get("EventRecordID"),
-        "event_code": system.get("EventID"),
+        "event_code": _event_code(system.get("EventID")),
         "action": "process_start",
         "process_name": _basename(image),
         "command_line": data.get("CommandLine") or system.get("CommandLine"),

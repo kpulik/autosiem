@@ -51,3 +51,28 @@ def test_clickhouse_uses_tenant_event_columns_and_validated_table():
     response.read.return_value = b"Code: 241. DB::Exception: memory limit exceeded"
     with pytest.raises(RuntimeError, match="acknowledge"):
         sink.deliver("a", "id", {})
+
+
+def test_transport_failures_become_the_error_type_the_cli_catches() -> None:
+    """HTTPError/URLError are neither ValueError nor RuntimeError, so they
+    escaped `outbox --deliver` and printed a traceback."""
+    import urllib.error
+    from email.message import Message
+    import pytest
+    from autosiem.projections import EventProjection
+
+    for failure in (
+        urllib.error.HTTPError("https://sink.test", 503, "busy", Message(), None),
+        urllib.error.URLError("connection refused"),
+    ):
+        projection = EventProjection("opensearch", "https://sink.test", "events")
+
+        def _raise(*_args: object, **_kwargs: object) -> None:
+            raise failure
+
+        projection._opener.open = _raise  # type: ignore[method-assign]
+        with pytest.raises(RuntimeError) as caught:
+            projection.deliver("tenant", "event-1", {"a": 1})
+        assert isinstance(caught.value, (ValueError, RuntimeError))
+        # The backend body can echo the document back; only the status escapes.
+        assert "a" not in str(caught.value).replace("failed", "")

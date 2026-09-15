@@ -8,6 +8,10 @@ from uuid import uuid4
 from .schemas import DetectionRule, Finding, NormalizedEvent
 
 
+class UnknownOperatorError(ValueError):
+    """A rule selection named an operator the engine does not implement."""
+
+
 def evaluate_rules(event: NormalizedEvent, rules: list[DetectionRule]) -> list[Finding]:
     return [finding for rule in rules if rule.enabled if (finding := evaluate_rule(event, rule))]
 
@@ -60,7 +64,53 @@ def _matches_selection(doc: dict[str, Any], selection: dict[str, Any]) -> bool:
     return True
 
 
+#: Every operator :func:`_match_operator` implements. A selection naming
+#: anything else is a BUG IN THE RULE, and the engine fails closed on it:
+#: the loop used to fall through to `return True`, so a typo
+#: (`contians`), an empty `{}`, or an unimplemented operator (`gt`)
+#: silently became an unconditional match - a rule that fires on every
+#: event. Sigma import already fails closed on unsupported modifiers;
+#: this is the same rule for native selections.
+_KNOWN_OPERATORS = frozenset({
+    "contains",
+    "contains_all",
+    "contains_any",
+    "endswith",
+    "endswith_all",
+    "endswith_any",
+    "equals",
+    "exists",
+    "in",
+    "not_contains",
+    "not_contains_all",
+    "not_contains_any",
+    "not_endswith",
+    "not_endswith_all",
+    "not_endswith_any",
+    "not_equals",
+    "not_in",
+    "not_regex",
+    "not_startswith",
+    "not_startswith_all",
+    "not_startswith_any",
+    "regex",
+    "startswith",
+    "startswith_all",
+    "startswith_any",
+})
+
+
 def _match_operator(actual: Any, expected: dict[str, Any]) -> bool:
+    if not expected:
+        # An empty operator map constrains nothing, so treating it as a
+        # match made the whole field a wildcard.
+        return False
+    unknown = set(expected) - _KNOWN_OPERATORS
+    if unknown:
+        raise UnknownOperatorError(
+            f"unknown selection operator(s) {sorted(unknown)}; "
+            f"supported: {sorted(_KNOWN_OPERATORS)}"
+        )
     text = "" if actual is None else str(actual)
     for operator, value in expected.items():
         if operator == "contains" and str(value).lower() not in text.lower():

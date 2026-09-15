@@ -426,3 +426,21 @@ def test_every_connector_http_call_carries_a_timeout(monkeypatch) -> None:
     connectors._urllib_post_form("https://example.test/token", {}, {"k": "v"})
     assert seen == [connectors.HTTP_TIMEOUT_SECONDS, connectors.HTTP_TIMEOUT_SECONDS]
     assert all(isinstance(value, float) and value > 0 for value in seen)
+
+
+def test_xml_and_json_sysmon_agree_on_eventid_type() -> None:
+    """XML left EventID a string, so it failed every numeric Sigma EventID rule."""
+    from autosiem.schemas import DetectionRule, Severity
+    from autosiem.detection import evaluate_rule
+    from autosiem.normalization import normalize
+
+    xml = '<Event><System><EventID>1</EventID></System><EventData><Data Name="Image">C:\\evil.exe</Data></EventData></Event>'
+    as_json = {"Event": {"System": {"EventID": 1}, "EventData": {"Image": "C:\\evil.exe"}}}
+    rule = DetectionRule(rule_id="S", name="t", description="", severity=Severity.HIGH,
+                         risk_points=50, selection={"event_code": 1}, mitre_attack=[], tags=[])
+    for raw in (xml, as_json):
+        assert evaluate_rule(normalize(connectors.sysmon_to_raw(raw)), rule) is not None
+
+    # A non-numeric channel name must survive untouched.
+    named = connectors.sysmon_to_raw('<Event><System><EventID>Security</EventID></System><EventData/></Event>')
+    assert named["event_code"] == "Security"

@@ -89,6 +89,25 @@ _BOOLEAN_SELECTION_KEYS = {"any_of", "all_of", "not"}
 # ---------------------------------------------------------------------------
 # Tiny YAML-subset parser
 # ---------------------------------------------------------------------------
+class UnmappedLogsourceError(ValueError):
+    """A Sigma logsource category has no normalized equivalent.
+
+    Carries ``category`` and the fully built ``rule``, so the sync can still
+    run field analysis and report every reason the rule was not importable
+    rather than only the first one hit.
+
+    Distinct from :class:`SigmaParseError` because the rule parsed fine. The
+    Distinct from :class:`SigmaParseError` because the rule parsed fine.
+    Importing it is still refused: without a category guard it would match any
+    event sharing its fields.
+    """
+
+    def __init__(self, category: str, rule: Any = None) -> None:
+        super().__init__(f"unmapped logsource category {category!r}")
+        self.category = category
+        self.rule = rule
+
+
 class SigmaParseError(ValueError):
     """Raised when the YAML-subset parser cannot understand a rule."""
 
@@ -124,9 +143,23 @@ def sigma_to_rule(data: dict[str, Any]) -> DetectionRule:
 
     detection = dict(data.get("detection") or {})
     selection = _sigma_detection_to_selection(detection)
-    logsource_selection = _sigma_logsource_to_selection(dict(data.get("logsource") or {}))
+    unmapped = ""
+    try:
+        logsource_selection = _sigma_logsource_to_selection(dict(data.get("logsource") or {}))
+    except UnmappedLogsourceError as exc:
+        # Build the rule anyway so the caller can inspect its fields, then
+        # re-raise with it attached. The rule is never returned to a caller
+        # that would run it.
+        unmapped, logsource_selection = exc.category, {}
     if logsource_selection:
         selection = _selection_all([logsource_selection, selection])
+
+    if unmapped:
+        raise UnmappedLogsourceError(unmapped, DetectionRule(
+            rule_id=rule_id, name=name, description=description, severity=severity,
+            risk_points=severity.value, selection=selection,
+            mitre_attack=mitre_attack, tags=[str(tag) for tag in tags],
+        ))
 
     return DetectionRule(
         rule_id=rule_id,
@@ -139,6 +172,18 @@ def sigma_to_rule(data: dict[str, Any]) -> DetectionRule:
         tags=tags,
         enabled=True,
     )
+
+
+#: Categories the normalizer itself produces (see EventCategory in schemas).
+#: A Sigma logsource naming one of these is already normalized, which is how
+#: AutoSIEM's own exported rules parse back in.
+#: What rule_to_sigma writes when a rule constrains no category.
+_NO_CATEGORY = "unspecified"
+
+_AUTOSIEM_CATEGORIES = frozenset({
+    "authentication", "process", "network", "dns", "cloud",
+    "file", "endpoint", "application", "email", "unknown",
+})
 
 
 def _sigma_logsource_to_selection(logsource: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +208,21 @@ def _sigma_logsource_to_selection(logsource: dict[str, Any]) -> dict[str, Any]:
     }
     if category in category_aliases:
         selection["category"] = category_aliases[category]
+    elif category == _NO_CATEGORY:
+        # What rule_to_sigma emits for a rule with no category constraint.
+        # Genuinely unconstrained, so adding nothing here is correct.
+        pass
+    elif category in _AUTOSIEM_CATEGORIES:
+        # AutoSIEM's own rules round-trip through export -> parse, and already
+        # name a normalized category.
+        selection["category"] = category
+    elif category:
+        # A category that is neither a known Sigma logsource nor an AutoSIEM
+        # one used to be silently DROPPED, importing the rule with no source
+        # guard at all: it then matched any event sharing its fields or
+        # EventID, far beyond what its author scoped it to. Unsupported Sigma
+        # syntax already fails closed; an unknown logsource does now too.
+        raise UnmappedLogsourceError(category)
     return selection
 
 

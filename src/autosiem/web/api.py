@@ -318,7 +318,8 @@ def api_sources(request: Request) -> list[dict[str, Any]]:
 @app.get("/api/audit")
 def api_audit(request: Request, limit: int = 100) -> list[dict[str, Any]]:
     _require_permission(request, PERM_AUDIT_READ)
-    return get_store().list_audit(limit=limit)
+    # Scoped: audit rows name actors and targets inside one tenant.
+    return get_store().list_audit(limit=limit, tenant_id=_tenant(request))
 
 
 def _rbac_store(request: Request) -> Rbac:
@@ -337,7 +338,7 @@ def _audit_user_change(request: Request, action: str, target: str, details: dict
     """Record a user-store mutation in the hash-chained audit log."""
     store = get_store()
     with store.connect() as conn:
-        store.audit(conn, actor=_actor(request, "admin"), action=action, target=target, details=details)
+        store.audit(conn, actor=_actor(request, "admin"), action=action, target=target, details=details, tenant_id=_tenant(request))
 
 
 @app.get("/api/users")
@@ -853,8 +854,8 @@ def sources_page(request: Request) -> str:
 
 
 @app.get("/audit", response_class=HTMLResponse)
-def audit_page() -> str:
-    rows = get_store().list_audit(limit=100)
+def audit_page(request: Request) -> str:
+    rows = get_store().list_audit(limit=100, tenant_id=_tenant(request))
     return _page("AutoSIEM Audit", f"<p class='links'><a href='/'>← Incident queue</a></p><h1>Audit Log</h1>{_table(rows)}")
 
 

@@ -199,7 +199,11 @@ class DistributedPipeline:
                         # input remains recoverable; the caller must retry the
                         # rejected batch after draining the queue.
                         raise
-                    # Backpressure hit - process what we have queued
+                    # Backpressure hit. Only the prefix reached the queue, so
+                    # only the prefix is durable; processing the whole batch
+                    # would report the un-enqueued suffix as handled and lose
+                    # it on a retry. Narrow `lines` to what actually enqueued.
+                    lines = lines[:len(enqueued)]
                     break
 
         result = self._process(lines)

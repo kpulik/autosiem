@@ -206,7 +206,60 @@ surface.
 | **Recommendation** | Catch `RecursionError`; enforce a body-size cap (SEC-003); restrict `data/` + users-file permissions (e.g. `chmod 0600` on `rbac_users.json`); recommend OS full-disk encryption on the host. |
 | **Severity** | **Low** |
 
-### SEC-017 — Threat-intel refresh allows plaintext fetch with no integrity check (Low)
+### SEC-019 — SQLite tenancy was a column, not a key (fixed 2026-09-15)
+
+**Severity:** High. **Status:** Fixed.
+
+`events`, `findings`, `incidents`, `investigations` and `action_proposals`
+carried a `tenant_id` column but kept single-column primary keys, and the
+insert path uses `INSERT OR REPLACE`. Two tenants writing the same upstream id
+therefore collided and the second silently destroyed the first's row.
+`event_id` comes from the source record, so any shared upstream feed - or a
+chosen id - triggers it. Reproduced: tenant A's event count went 1 -> 0 on
+tenant B's write. PostgreSQL already used composite keys; SQLite is the
+default, so the default backend had no isolation.
+
+**Fix:** composite `(tenant_id, <id>)` primary keys, with a migration that
+rebuilds legacy tables in place and preserves rows. Tables are listed once in
+`storage._TENANT_KEYED_TABLES`.
+
+## SEC-020 — Audit log was global across tenants (fixed 2026-09-15)
+
+**Severity:** High. **Status:** Fixed.
+
+`audit_log` had no `tenant_id` and `list_audit()` took no tenant argument, while
+viewers and analysts hold `audit:read`. A tenant-A user reading `/api/audit` or
+`/audit` saw tenant-B actors, targets and details.
+
+**Fix:** a `tenant_id` column, writes scoped at every call site, and reads
+filtered by the requesting tenant. `list_audit(tenant_id=None)` still returns
+everything for chain verification and single-tenant CLI use.
+
+**Deliberate limitation:** `tenant_id` is NOT part of the hashed audit payload.
+Adding a field would recompute every historical digest and make `audit-verify`
+report tamper on every existing database. The chain protects audit *content*;
+the tenant column is access-control metadata, and anyone able to rewrite it
+already has direct database access.
+
+## SEC-021 — Detection selections failed open (fixed 2026-09-15)
+
+**Severity:** High. **Status:** Fixed.
+
+`_match_operator` looped over a selection's operators and fell through to
+`return True`. An unrecognized operator therefore matched unconditionally: a
+typo (`contians`), an empty `{}`, or one of the `gt`/`gte`/`lt`/`lte` operators
+documented as unimplemented all produced a rule that fired on **every event**.
+The Sigma import path already failed closed on unsupported modifiers; the
+native engine did the opposite.
+
+**Fix:** an allowlist harvested from the engine's own branches, validated at
+rule-load time so a bad rule is named at startup rather than stopping an ingest
+run mid-stream, with an evaluation-time raise as the backstop.
+
+Found by an automated review on PR #1, then reproduced before fixing. All three
+predate the PostgreSQL work and shipped to public main.
+
+## SEC-017 — Threat-intel refresh allows plaintext fetch with no integrity check (Low)
 
 | | |
 |---|---|

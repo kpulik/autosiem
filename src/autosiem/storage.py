@@ -137,8 +137,9 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                             action="incident_commented",
                             target=incident.incident_id,
                             details={"comment_id": comment["comment_id"], "source": "ai_case_note", "tenant_id": tenant},
+                            tenant_id=tenant,
                         )
-            self.audit(conn, actor="system", action="pipeline_result_saved", target=None, details={"events": len(result.events), "findings": len(result.findings), "incidents": len(result.incidents), "tenant_id": tenant})
+            self.audit(conn, actor="system", action="pipeline_result_saved", target=None, details={"events": len(result.events), "findings": len(result.findings), "incidents": len(result.incidents), "tenant_id": tenant}, tenant_id=tenant)
             if getattr(result, "suppressed", None):
                 self.audit(
                     conn,
@@ -146,6 +147,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                     action="findings_suppressed",
                     target=None,
                     details={"count": len(result.suppressed), "items": result.suppressed},
+                    tenant_id=tenant,
                 )
 
     def _save_investigation(
@@ -368,6 +370,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 action=f"proposal_{decision}",
                 target=proposal["target"],
                 details={"proposal_id": proposal_id, "action": proposal["action"], "tenant_id": proposal["tenant_id"]},
+                tenant_id=proposal["tenant_id"],
             )
             return _row_to_dict(proposal) | {"status": decision}
 
@@ -407,7 +410,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
             if note:
                 self._add_comment(conn, incident_id, actor, note, tenant_id=current["tenant_id"])
             changed = {"status": current["status"], "assignee": current["assignee"], "resolution": current["resolution"], "tenant_id": current["tenant_id"]}
-            self.audit(conn, actor=actor, action="incident_updated", target=incident_id, details=changed)
+            self.audit(conn, actor=actor, action="incident_updated", target=incident_id, details=changed, tenant_id=tenant_id)
             return _row_to_dict(self._select_row(conn, "incidents", "incident_id", incident_id, current["tenant_id"]))
 
     def load_baseline(self, tenant_id: str | None = None) -> dict[str, Any] | None:
@@ -438,7 +441,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
             if not exists:
                 return None
             comment = self._add_comment(conn, incident_id, actor, body, tenant_id=exists["tenant_id"])
-            self.audit(conn, actor=actor, action="incident_commented", target=incident_id, details={"comment_id": comment["comment_id"], "tenant_id": exists["tenant_id"]})
+            self.audit(conn, actor=actor, action="incident_commented", target=incident_id, details={"comment_id": comment["comment_id"], "tenant_id": exists["tenant_id"]}, tenant_id=exists["tenant_id"])
             return comment
 
     def list_incident_comments(self, incident_id: str, tenant_id: str | None = None) -> list[dict[str, Any]]:
@@ -546,7 +549,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 "values(?,?,?,?,?,?,?,?,?,?,?,?)",
                 tuple(row[k] for k in ("suppression_id", "rule_id", "name", "action", "entity", "downgrade_to", "reason", "expires_at", "created_by", "created_at", "enabled", "tenant_id")),
             )
-            self.audit(conn, actor=created_by, action="suppression_added", target=str(row["suppression_id"]), details={"rule_id": rule_id, "name": name, "action": action, "tenant_id": tenant})
+            self.audit(conn, actor=created_by, action="suppression_added", target=str(row["suppression_id"]), details={"rule_id": rule_id, "name": name, "action": action, "tenant_id": tenant}, tenant_id=tenant)
             return row
 
     def delete_suppression(self, suppression_id: str, actor: str = DEFAULT_CREATED_BY, tenant_id: str | None = None) -> bool:
@@ -560,15 +563,23 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 cursor = conn.execute("delete from suppressions where suppression_id = ?", (suppression_id,))
             if cursor.rowcount == 0:
                 return False
-            self.audit(conn, actor=actor, action="suppression_deleted", target=suppression_id, details={"tenant_id": tenant_id or DEFAULT_TENANT})
+            self.audit(conn, actor=actor, action="suppression_deleted", target=suppression_id, details={"tenant_id": tenant_id or DEFAULT_TENANT}, tenant_id=tenant_id)
             return True
 
-    def audit(self, conn: Any, actor: str, action: str, target: str | None, details: dict[str, Any]) -> None:
+    def audit(self, conn: Any, actor: str, action: str, target: str | None,
+              details: dict[str, Any], tenant_id: str | None = None) -> None:
         """Append an audit row to the append-only, hash-chained audit log.
 
         Each row links to the previous row's SHA-256 hash (``prev_hash``), so
         tampering with any historical entry is detectable by
         :meth:`verify_audit_chain`.
+
+        ``tenant_id`` scopes the row for :meth:`list_audit`. It is deliberately
+        NOT part of the hashed payload: adding a field would recompute every
+        historical digest and make `audit-verify` report tamper on every
+        existing database. The chain protects audit CONTENT; the tenant column
+        is access-control metadata. Anyone able to rewrite it already has
+        direct database access.
         """
         timestamp = datetime.now(timezone.utc).isoformat()
         previous = conn.execute("select hash from audit_log order by audit_id desc limit 1").fetchone()
@@ -576,8 +587,10 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
         payload = f"{prev_hash}|{timestamp}|{actor}|{action}|{target or ''}|{_json(details)}"
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
         conn.execute(
-            "insert into audit_log(timestamp,actor,action,target,details,prev_hash,hash) values(?,?,?,?,?,?,?)",
-            (timestamp, actor, action, target, _json(details), prev_hash, digest),
+            "insert into audit_log(timestamp,actor,action,target,details,prev_hash,hash,tenant_id) "
+            "values(?,?,?,?,?,?,?,?)",
+            (timestamp, actor, action, target, _json(details), prev_hash, digest,
+             tenant_id or DEFAULT_TENANT),
         )
 
     def verify_audit_chain(self) -> list[dict[str, Any]]:
@@ -609,7 +622,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 "on conflict(rule_id, tenant_id) do update set enabled=excluded.enabled, updated_at=excluded.updated_at",
                 (rule_id, tenant, 1 if enabled else 0, now),
             )
-            self.audit(conn, actor, "rule_state_changed", rule_id, {"enabled": enabled, "tenant_id": tenant})
+            self.audit(conn, actor, "rule_state_changed", rule_id, {"enabled": enabled, "tenant_id": tenant}, tenant_id=tenant)
         return {"rule_id": rule_id, "enabled": enabled, "tenant_id": tenant}
 
     def list_rule_states(self, tenant_id: str | None = None) -> list[dict[str, Any]]:
@@ -658,10 +671,38 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 "suppressions": _count("select count(*) from suppressions"),
             }
 
-    def list_audit(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_audit(self, limit: int = 100, tenant_id: str | None = None) -> list[dict[str, Any]]:
+        """Audit rows, scoped to one tenant unless the caller is cross-tenant.
+
+        ``tenant_id=None`` returns every row and exists for chain verification
+        and single-tenant CLI use. API callers must pass their own tenant:
+        audit rows name actors and targets, so an unscoped read handed one
+        tenant another tenant's activity to anyone holding ``audit:read``.
+        """
         with self.connect() as conn:
-            rows = conn.execute("select * from audit_log order by audit_id desc limit ?", (limit,)).fetchall()
+            if tenant_id is None:
+                rows = conn.execute(
+                    "select * from audit_log order by audit_id desc limit ?", (limit,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "select * from audit_log where tenant_id = ? order by audit_id desc limit ?",
+                    (tenant_id, limit),
+                ).fetchall()
             return [_row_to_dict(row) for row in rows]
+
+
+#: Data-plane tables keyed by (tenant_id, <id>). Two tenants may legitimately
+#: carry the same upstream id, so every one of these needs a COMPOSITE primary
+#: key; a single-column key plus INSERT OR REPLACE is silent cross-tenant data
+#: loss. Add a new tenant-scoped table here and the migration handles it.
+_TENANT_KEYED_TABLES = (
+    ("events", "event_id"),
+    ("findings", "finding_id"),
+    ("incidents", "incident_id"),
+    ("investigations", "investigation_id"),
+    ("action_proposals", "proposal_id"),
+)
 
 
 class AutoSIEMStorage(RelationalStorage):
@@ -687,7 +728,7 @@ class AutoSIEMStorage(RelationalStorage):
             conn.executescript(
                 """
                 create table if not exists events (
-                    event_id text primary key,
+                    event_id text not null,
                     timestamp text not null,
                     category text not null,
                     action text not null,
@@ -695,38 +736,50 @@ class AutoSIEMStorage(RelationalStorage):
                     host text,
                     src_ip text,
                     severity text,
-                    data text not null
+                    data text not null,
+                    -- matches DEFAULT_TENANT; literal kept because this DDL is not an f-string
+                    tenant_id text not null default 'default',
+                    -- Composite: two tenants may legitimately carry the same
+                    -- upstream event_id. A single-column key let one tenant's
+                    -- INSERT OR REPLACE destroy another tenant's row.
+                    primary key (tenant_id, event_id)
                 );
                 create table if not exists findings (
-                    finding_id text primary key,
+                    finding_id text not null,
                     rule_id text not null,
                     rule_name text not null,
                     event_id text not null,
                     timestamp text not null,
                     severity text not null,
                     risk_points integer not null,
-                    data text not null
+                    data text not null,
+                    tenant_id text not null default 'default',
+                    primary key (tenant_id, finding_id)
                 );
                 create table if not exists incidents (
-                    incident_id text primary key,
+                    incident_id text not null,
                     title text not null,
                     severity text not null,
                     risk_score integer not null,
                     status text not null default 'open',
                     created_at text not null,
-                    data text not null
+                    data text not null,
+                    tenant_id text not null default 'default',
+                    primary key (tenant_id, incident_id)
                 );
                 create table if not exists investigations (
-                    investigation_id text primary key,
+                    investigation_id text not null,
                     incident_id text not null,
                     status text not null,
                     decision text not null,
                     confidence real not null,
                     created_at text not null,
-                    data text not null
+                    data text not null,
+                    tenant_id text not null default 'default',
+                    primary key (tenant_id, investigation_id)
                 );
                 create table if not exists action_proposals (
-                    proposal_id text primary key,
+                    proposal_id text not null,
                     investigation_id text not null,
                     incident_id text not null,
                     action text not null,
@@ -735,7 +788,9 @@ class AutoSIEMStorage(RelationalStorage):
                     approval_required integer not null,
                     executable_now integer not null,
                     status text not null default 'pending',
-                    data text not null
+                    data text not null,
+                    tenant_id text not null default 'default',
+                    primary key (tenant_id, proposal_id)
                 );
                 create table if not exists audit_log (
                     audit_id integer primary key autoincrement,
@@ -743,7 +798,11 @@ class AutoSIEMStorage(RelationalStorage):
                     actor text not null,
                     action text not null,
                     target text,
-                    details text not null
+                    details text not null,
+                    -- Audit rows name actors and targets belonging to one
+                    -- tenant. Without this column list_audit served every
+                    -- tenant's history to any caller holding audit:read.
+                    tenant_id text not null default 'default'
                 );
                 create table if not exists suppressions (
                     suppression_id text primary key,
@@ -806,13 +865,43 @@ class AutoSIEMStorage(RelationalStorage):
             # Migration: per-tenant data isolation (RBAC depth). Existing rows
             # fall into the '{DEFAULT_TENANT}' tenant so behaviour is unchanged
             # for single-tenant deployments.
-            for table in ("events", "findings", "incidents", "investigations", "action_proposals"):
+            for table, key in _TENANT_KEYED_TABLES:
                 table_columns = {row["name"] for row in conn.execute(f"pragma table_info({table})")}
                 if "tenant_id" not in table_columns:
                     conn.execute(
                         f"alter table {table} add column tenant_id text not null default '{DEFAULT_TENANT}'"
                     )
+                    table_columns.add("tenant_id")
+                # Adding the column was not enough. The primary key stayed
+                # single-column, and _insert uses INSERT OR REPLACE, so a second
+                # tenant writing the same upstream id REPLACED the first
+                # tenant's row - silent cross-tenant data loss. SQLite cannot
+                # ALTER a primary key, so the table is rebuilt exactly as
+                # rule_state already was when it gained tenancy.
+                primary_key = [row["name"] for row in conn.execute(f"pragma table_info({table})") if row["pk"]]
+                if primary_key != [key, "tenant_id"] and sorted(primary_key) != sorted([key, "tenant_id"]):
+                    columns = [row["name"] for row in conn.execute(f"pragma table_info({table})")]
+                    definitions = ", ".join(
+                        f'"{row["name"]}" {row["type"]}'
+                        + (" not null" if row["notnull"] else "")
+                        + (f' default {row["dflt_value"]}' if row["dflt_value"] is not None else "")
+                        for row in conn.execute(f"pragma table_info({table})")
+                    )
+                    names = ", ".join(f'"{name}"' for name in columns)
+                    conn.executescript(
+                        f'create table "_{table}_new" ({definitions}, primary key ("{key}", tenant_id));'
+                        f'insert or ignore into "_{table}_new"({names}) select {names} from "{table}";'
+                        f'drop table "{table}";'
+                        f'alter table "_{table}_new" rename to "{table}";'
+                    )
                 conn.execute(f"create index if not exists idx_{table}_tenant_id on {table}(tenant_id)")
+            # Migration: audit rows name actors and targets inside one tenant.
+            audit_tenant = {row["name"] for row in conn.execute("pragma table_info(audit_log)")}
+            if "tenant_id" not in audit_tenant:
+                conn.execute(
+                    f"alter table audit_log add column tenant_id text not null default '{DEFAULT_TENANT}'"
+                )
+            conn.execute("create index if not exists idx_audit_tenant on audit_log(tenant_id)")
             # Migration: control-plane tenancy — per-tenant suppressions and
             # rule_state.  Existing rows land in 'default' so single-tenant
             # deployments are unaffected.
