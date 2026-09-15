@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import urllib.parse
 import os
 import secrets
 import time
@@ -178,7 +179,7 @@ def _tenant(request: Request) -> str | None:
 #: Rendered HTML pages. These read incident, event and audit data, so they are
 #: authenticated exactly like /api/* - an unauthenticated /audit would hand the
 #: whole tamper-evident log to anyone who can reach the port.
-UI_PAGES = frozenset({"/", "/events", "/findings", "/sources", "/audit", "/rules", "/suppressions"})
+UI_PAGES = frozenset({"/", "/events", "/findings", "/sources", "/audit", "/rules", "/suppressions", "/search"})
 
 
 def _is_readonly_ui_get(path: str, method: str) -> bool:
@@ -711,7 +712,7 @@ def index(request: Request, query: str | None = None, entity: str | None = None)
         <section class="grid">
           {''.join(_incident_card(item) for item in incidents) or '<div class="empty">No incidents yet. Load demo telemetry to populate the queue.</div>'}
         </section>
-        <p class="links"><a href="/events">Events</a> · <a href="/findings">Findings</a> · <a href="/rules">Rules</a> · <a href="/sources">Sources</a> · <a href="/suppressions">Suppressions</a> · <a href="/audit">Audit log</a> · <a href="/docs">API docs</a></p>
+        <p class="links"><a href="/search">Ask a question</a> · <a href="/events">Events</a> · <a href="/findings">Findings</a> · <a href="/rules">Rules</a> · <a href="/sources">Sources</a> · <a href="/suppressions">Suppressions</a> · <a href="/audit">Audit log</a> · <a href="/docs">API docs</a></p>
         """,
     )
 
@@ -829,6 +830,103 @@ def events_page(request: Request, query: str | None = None, entity: str | None =
         {_table(rows)}
         """,
     )
+
+
+#: Shown on an empty search page. The parser is a small keyword translator, not
+#: a language model, so the examples double as documentation of what it knows.
+SEARCH_EXAMPLES = (
+    "failed logins by user alice last 24h",
+    "open critical incidents",
+    "events from ip 198.51.100.25",
+    "incidents for host workstation-7",
+    "resolved incidents from rule AUTO-CLOUD-001",
+)
+
+
+def _translation_panel(dsl: dict[str, Any], cli: list[str], target: str) -> str:
+    """Show what the query became, not just what it returned.
+
+    `translate_query` is a keyword translator: it moves recognised terms into
+    structured fields and leaves the rest in a free-text `query`. Hiding that
+    would make a crude parser look like comprehension, so every extracted field
+    is shown with its value, and the leftover free text is shown as leftover.
+    The CLI line is the same search as a command, which is what makes the page
+    teachable rather than magic.
+    """
+    understood = "".join(
+        f"<span><strong>{_esc(key)}</strong> {_esc(str(value))}</span>"
+        for key, value in dsl.items() if value not in (None, "")
+    ) or "<span>nothing recognised</span>"
+    command = "autosiem search-nl " + " ".join(cli) if cli else "autosiem search-nl"
+    return f"""
+    <div class="panel translation">
+      <span class="eyebrow">How this was read</span>
+      <div class="chips">{understood}</div>
+      <p class="provenance-note">
+        Recognised terms become structured filters; anything left over is matched as
+        free text. Searching <strong>{_esc(target)}</strong>.
+      </p>
+      <button class="secondary copy" type="button" data-copy="{_esc(command)}"
+              title="Copy to run the same search from the terminal">{_esc(command)}</button>
+    </div>
+    """
+
+
+@app.get("/search", response_class=HTMLResponse)
+def search_page(request: Request, q: str | None = None, target: str = "incidents") -> str:
+    target = "events" if target == "events" else "incidents"
+    examples = "".join(
+        f"<a class='chipbtn chip-link' href='/search?q={urllib.parse.quote(example)}&target={target}'>"
+        f"{_esc(example)}</a>" for example in SEARCH_EXAMPLES
+    )
+    quoted = urllib.parse.quote(q or "")
+    toggle = "".join(
+        "<a class='chipbtn{active}' href='/search?q={q}&target={name}'>{name}</a>".format(
+            active=" active" if target == name else "", q=quoted, name=name)
+        for name in ("incidents", "events")
+    )
+    body = [
+        "<p class='links'><a href='/'>← Incident queue</a></p><h1>Natural-language search</h1>",
+        f"""
+        <form class="search search-nl" method="get" action="/search">
+          <input name="q" value="{_esc(q or '')}" autofocus
+                 placeholder="Ask in plain English: failed logins by user alice last 24h">
+          <input type="hidden" name="target" value="{_esc(target)}">
+          <button>Search</button>
+        </form>
+        <div class="chiprow">{toggle}</div>
+        """,
+    ]
+    if not q:
+        body.append(f"<div class='panel'><span class='eyebrow'>Try one</span>"
+                    f"<div class='chiprow'>{examples}</div></div>")
+    else:
+        found = api_search_nl(request, q=q, target=target)
+        body.append(_translation_panel(found["translation"], found["cli"], target))
+        total = found["total"]
+        noun = target if total != 1 else target.rstrip("s")
+        body.append(f"<p class='links'><strong>{total}</strong> {_esc(noun)} matched.</p>")
+        body.append(_table(found["results"]))
+        body.append(f"<div class='panel'><span class='eyebrow'>Other examples</span>"
+                    f"<div class='chiprow'>{examples}</div></div>")
+    body.append("""
+    <script>
+      // One interaction: the CLI line copies itself, so a search found in the
+      // browser can be rerun in a terminal or a cron job.
+      document.querySelectorAll('.copy').forEach(function (node) {
+        node.addEventListener('click', function () {
+          var text = node.getAttribute('data-copy');
+          var done = function () {
+            var was = node.textContent;
+            node.textContent = 'copied';
+            setTimeout(function () { node.textContent = was; }, 1200);
+          };
+          if (navigator.clipboard) { navigator.clipboard.writeText(text).then(done, function () {}); }
+        });
+      });
+    </script>
+    """)
+    return _page("AutoSIEM Search", "".join(body))
 
 
 @app.get("/findings", response_class=HTMLResponse)
@@ -1134,6 +1232,22 @@ def _page(title: str, body: str) -> str:
     .timeline-item h3 {{ margin:4px 0; }} .dot {{ width:10px; height:10px; margin-top:7px; border-radius:999px; background:var(--accent); box-shadow:0 0 18px var(--accent); }}
     .links {{ margin:18px 0; }} .empty, .row {{ background:rgba(17,28,47,.8); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; overflow:auto; }}
     pre {{ white-space:pre-wrap; color:#dbeafe; }}
+    .search-nl {{ grid-template-columns:1fr auto; }}
+    .translation {{ margin:18px 0; padding:22px; }}
+    .translation .chips span {{ background:#1b2a43; border:1px solid rgba(125,211,252,.22); }}
+    .translation .chips strong {{ color:var(--accent); margin-right:6px; font-weight:700;
+      text-transform:uppercase; letter-spacing:.08em; font-size:11px; }}
+    .copy {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px;
+      border-radius:12px; margin-top:12px; max-width:100%; overflow:hidden;
+      text-overflow:ellipsis; white-space:nowrap; }}
+    .copy:hover {{ background:#33445f; }}
+    /* .chipbtn only carried colour; the pill shape came from the `button`
+       element selector, so the same class on an <a> rendered flat. */
+    a.chipbtn {{ display:inline-block; border-radius:999px; padding:10px 16px;
+      font-weight:700; border:1px solid rgba(255,255,255,.08); }}
+    a.chipbtn:hover {{ border-color:var(--accent); }}
+    a.chipbtn.active {{ background:linear-gradient(135deg,#38bdf8,#818cf8); color:white;
+      border-color:transparent; }}
   </style>
 </head>
 <body><main>{body}</main></body>
