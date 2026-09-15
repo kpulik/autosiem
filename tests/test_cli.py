@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
 
 import pytest
 
-from autosiem.cli import main
+from autosiem.cli import _CONNECTOR_IDENTITY, _connector_config, main
 
 ROOT = Path(__file__).resolve().parents[1]
 RULES_DIR = ROOT / "rules"
@@ -176,3 +177,61 @@ def test_users_add_rejects_unknown_role(capsys, monkeypatch, tmp_path) -> None:
     payload = _json(out)
     assert "unknown role" in payload["error"]
     assert not users_file.exists()
+
+
+# --- connector cursor isolation -------------------------------------------
+
+
+def _poll_args(connector: str, **overrides: object) -> argparse.Namespace:
+    args = argparse.Namespace(
+        db="data/autosiem.db", connector=connector, path=None, url=None, org=None,
+        token_env=None, since=None, limit=None, max_pages=None, state=None,
+        tenant_id=None, client_id=None,
+    )
+    for key, value in overrides.items():
+        setattr(args, key, value)
+    return args
+
+
+def test_each_remote_source_gets_its_own_cursor_file() -> None:
+    """Two orgs sharing one --db shared a cursor AND a seen-id window.
+
+    The second source resumed from the first's cursor and had its own records
+    suppressed as already-delivered, which is silent event loss.
+    """
+    paths = [
+        _connector_config(_poll_args("github-api", org="acme"))["state_path"],
+        _connector_config(_poll_args("github-api", org="other-corp"))["state_path"],
+        _connector_config(_poll_args("okta-api", url="https://a.okta.com"))["state_path"],
+        _connector_config(_poll_args("okta-api", url="https://b.okta.com"))["state_path"],
+        _connector_config(_poll_args("entra-api", tenant_id="t-1", client_id="c"))["state_path"],
+        _connector_config(_poll_args("entra-api", tenant_id="t-2", client_id="c"))["state_path"],
+    ]
+    assert len(set(paths)) == len(paths)
+
+
+def test_the_cursor_file_is_stable_for_the_same_source() -> None:
+    """A changing filename would replay the lookback window on every poll."""
+    first = _connector_config(_poll_args("github-api", org="acme"))["state_path"]
+    second = _connector_config(_poll_args("github-api", org="acme"))["state_path"]
+    assert first == second
+    assert first.endswith("_cursor.json") and "github-api" in first
+
+
+def test_an_explicit_state_flag_still_wins() -> None:
+    config = _connector_config(_poll_args("github-api", org="acme", state="/tmp/mine.json"))
+    assert config["state_path"] == "/tmp/mine.json"
+
+
+def test_a_file_based_connector_gets_no_cursor_file() -> None:
+    assert "state_path" not in _connector_config(_poll_args("file", path="/tmp/events.jsonl"))
+
+
+def test_every_identity_flag_changes_the_cursor_file() -> None:
+    """Adding an org/tenant-scoped connector means adding its flag to the key."""
+    base_fields = {"org": "acme"}
+    base = _connector_config(_poll_args("github-api", **base_fields))["state_path"]
+    for field in _CONNECTOR_IDENTITY:
+        fields = {**base_fields, field: "different"}
+        changed = _connector_config(_poll_args("github-api", **fields))["state_path"]
+        assert changed != base, f"{field} does not affect the cursor filename"

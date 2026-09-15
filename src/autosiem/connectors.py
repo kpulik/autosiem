@@ -23,6 +23,11 @@ from typing import Any, Callable
 
 from .net import InsecureURLError, require_https
 
+#: Socket timeout for every connector HTTP call. Without it urlopen inherits
+#: the global default, which is None, so a silent peer hangs a poll forever and
+#: collection stops with no error to alert on.
+HTTP_TIMEOUT_SECONDS = 30.0
+
 
 @dataclass(slots=True)
 class ConnectorHealth:
@@ -863,7 +868,7 @@ def _urllib_get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str],
     """Stdlib GET returning ``(status, headers, body)``; no third-party deps."""
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.status, dict(response.headers.items()), response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = ""
@@ -1452,7 +1457,7 @@ def _urllib_post_form(url: str, headers: dict[str, str],
     data = urllib.parse.urlencode(form).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.status, dict(response.headers.items()), response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = ""

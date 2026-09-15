@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from autosiem import connectors
 from autosiem.connectors import (
     AssetConnector,
     CloudTrailConnector,
@@ -397,3 +398,31 @@ def test_asset_maps_endpoint_fields() -> None:
     assert raw["user"] == "alice"
     assert raw["cloud_account"] == "acme"
     assert isinstance(registry.create("asset", {"path": "/tmp"}), AssetConnector)
+
+
+def test_every_connector_http_call_carries_a_timeout(monkeypatch) -> None:
+    """urlopen inherits a None global default, so a silent peer hangs a poll forever."""
+    seen: list[object] = []
+
+    class FakeResponse:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def read(self) -> bytes:
+            return b"{}"
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+    def fake_urlopen(request: object, timeout: object = None) -> FakeResponse:
+        seen.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(connectors.urllib.request, "urlopen", fake_urlopen)
+    connectors._urllib_get("https://example.test/a", {})
+    connectors._urllib_post_form("https://example.test/token", {}, {"k": "v"})
+    assert seen == [connectors.HTTP_TIMEOUT_SECONDS, connectors.HTTP_TIMEOUT_SECONDS]
+    assert all(isinstance(value, float) and value > 0 for value in seen)
