@@ -45,11 +45,12 @@ def test_bind_adapter_preserves_literals_identifiers_and_comments():
 
 def test_packaged_migrations_are_contiguous_and_history_is_checked():
     migrations = postgres._migrations()
-    assert [row[0] for row in migrations] == [1, 2]
+    assert [row[0] for row in migrations] == list(range(1, len(migrations) + 1))
     history = [{"version": v, "checksum": h} for v, h, _ in migrations]
-    assert postgres._validate_history(history, migrations) == 2
+    assert postgres._validate_history(history, migrations) == len(migrations)
     with pytest.raises(RuntimeError, match="newer"):
-        postgres._validate_history(history + [{"version": 3, "checksum": "unknown"}], migrations)
+        postgres._validate_history(
+            history + [{"version": len(migrations) + 1, "checksum": "unknown"}], migrations)
     history[0]["checksum"] = "changed"
     with pytest.raises(RuntimeError, match="mismatch"):
         postgres._validate_history(history, migrations)
@@ -91,7 +92,8 @@ def result():
 def test_pg_explicit_migrations_and_no_startup_ddl(pg_dsn):
     with pytest.raises(RuntimeError, match="missing"):
         postgres.PostgresStorage(pg_dsn)
-    assert postgres.migrate(pg_dsn) == [1, 2]
+    expected = [version for version, _, _ in postgres._migrations()]
+    assert postgres.migrate(pg_dsn) == expected
     assert postgres.migrate(pg_dsn) == []
     postgres.PostgresStorage(pg_dsn)
 
@@ -104,7 +106,7 @@ def test_pg_failed_migration_rolls_back(pg_dsn, monkeypatch):
         postgres.migrate(pg_dsn)
     with postgres._connection(pg_dsn) as conn:
         assert conn.execute("select to_regclass('autosiem.incomplete') as name").fetchone()["name"] is None
-        assert conn.execute("select count(*) as n from schema_migrations").fetchone()["n"] == 2
+        assert conn.execute("select count(*) as n from schema_migrations").fetchone()["n"] == len(migrations)
 
 
 def test_pg_tenant_collisions_and_replay_preserve_decisions(pg, result):
@@ -369,9 +371,35 @@ def test_pg_text_columns_decode_on_a_sql_ascii_database(pg_dsn):
         ).format(driver.sql.Identifier(name)))
     try:
         ascii_dsn = driver.conninfo.make_conninfo(base, dbname=name)
-        assert postgres.migrate(ascii_dsn) == [1, 2]
+        assert postgres.migrate(ascii_dsn) == [v for v, _, _ in postgres._migrations()]
         assert postgres.migrate(ascii_dsn) == []
         postgres.PostgresStorage(ascii_dsn)
     finally:
         with driver.connect(base, autocommit=True) as admin:
             admin.execute(driver.sql.SQL("drop database {}").format(driver.sql.Identifier(name)))
+
+
+def test_pg_audit_is_tenant_scoped_and_the_chain_still_verifies(pg):
+    """PostgresStorage.audit overrode the base signature and dropped tenant_id.
+
+    Every audited write on this path raised TypeError, which the SQLite-only
+    profile could not catch.
+    """
+    with pg.connect() as conn:
+        pg.audit(conn, "admin-B", "proposal_approved", "host:secret-b", {}, tenant_id="tenant-b")
+        pg.audit(conn, "admin-A", "proposal_approved", "host:secret-a", {}, tenant_id="tenant-a")
+
+    a_targets = {row["target"] for row in pg.list_audit(tenant_id="tenant-a")}
+    b_targets = {row["target"] for row in pg.list_audit(tenant_id="tenant-b")}
+    assert "host:secret-a" in a_targets and "host:secret-b" not in a_targets
+    assert "host:secret-b" in b_targets and "host:secret-a" not in b_targets
+    assert len(pg.list_audit()) >= 2      # unscoped read still sees everything
+    assert pg.verify_audit_chain() == []  # tenant_id is outside the hashed payload
+
+
+def test_pg_saving_a_result_audits_without_a_signature_mismatch(pg, result):
+    """The regression that broke CI: save_pipeline_result audits with a tenant."""
+    pg.save_pipeline_result(result, "tenant-a")
+    actions = {row["action"] for row in pg.list_audit(tenant_id="tenant-a")}
+    assert "pipeline_result_saved" in actions
+    assert pg.list_audit(tenant_id="tenant-b") == []
