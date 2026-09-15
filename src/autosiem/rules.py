@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .detection import _KNOWN_OPERATORS
 from .schemas import DetectionRule, Severity
 
 
@@ -62,9 +63,35 @@ def _load_rule_file(path: Path) -> DetectionRule:
     return load_rule_file(path)
 
 
+def validate_selection(selection: dict[str, Any], rule_id: str) -> None:
+    """Reject a selection naming an operator the engine cannot evaluate.
+
+    Checked at LOAD time, not match time: a typo'd operator used to fall
+    through to an unconditional match, and raising only during evaluation would
+    stop a whole ingest run on one bad rule instead of naming it at startup.
+    """
+    for field, expected in selection.items():
+        if field in ("any_of", "all_of", "not"):
+            nodes = expected if isinstance(expected, list) else [expected]
+            for node in nodes:
+                if isinstance(node, dict):
+                    validate_selection(node, rule_id)
+        elif isinstance(expected, dict):
+            unknown = set(expected) - _KNOWN_OPERATORS
+            if unknown:
+                raise ValueError(
+                    f"rule {rule_id!r} field {field!r} uses unknown operator(s) "
+                    f"{sorted(unknown)}; supported: {sorted(_KNOWN_OPERATORS)}"
+                )
+            if not expected:
+                raise ValueError(f"rule {rule_id!r} field {field!r} has an empty operator map")
+
+
 def rule_from_dict(data: dict[str, Any]) -> DetectionRule:
+    rule_id = str(data["id"])
+    validate_selection(dict(data.get("selection", {})), rule_id)
     return DetectionRule(
-        rule_id=str(data["id"]),
+        rule_id=rule_id,
         name=str(data["name"]),
         description=str(data.get("description", "")),
         severity=Severity.from_value(data.get("severity")),

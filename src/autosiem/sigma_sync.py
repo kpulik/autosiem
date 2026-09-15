@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterable
 
 from .net import require_https
 from .schemas import DetectionRule, NormalizedEvent
-from .sigma import SigmaParseError, parse_sigma_yaml, sigma_to_rule
+from .sigma import SigmaParseError, UnmappedLogsourceError, parse_sigma_yaml, sigma_to_rule
 
 RELEASES_URL = "https://api.github.com/repos/SigmaHQ/sigma/releases/latest"
 USER_AGENT = "autosiem-sigma-sync"
@@ -209,6 +209,21 @@ def sync_rules(
         try:
             text = archive.read(name).decode("utf-8", "replace")
             rule = sigma_to_rule(parse_sigma_yaml(text))
+        except UnmappedLogsourceError as exc:
+            # Parsed fine, but its logsource has no normalized equivalent, so it
+            # cannot be scoped and is not importable. Counted as not_applicable,
+            # recording BOTH the category and any missing fields so the
+            # histogram still ranks what the normalizer would have to learn.
+            report.not_applicable += 1
+            # missing_counter, not report.missing_fields: the report field is
+            # rebuilt from this counter once the archive is walked.
+            key = f"logsource:{exc.category}"
+            missing_counter[key] = missing_counter.get(key, 0) + 1
+            if exc.rule is not None:
+                _, missing = classify_rule(exc.rule, allowed)
+                for field_name in missing:
+                    missing_counter[field_name] = missing_counter.get(field_name, 0) + 1
+            continue
         except (SigmaParseError, ValueError, KeyError, TypeError, IndexError) as exc:
             report.unsupported_syntax += 1
             if len(report.syntax_samples) < 5:

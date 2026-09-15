@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -59,6 +60,20 @@ class EventProjection:
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         request = urllib.request.Request(url, data=body, method=method, headers=headers)
+        try:
+            self._send(request, key)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            # urllib raises HTTPError/URLError, neither of which is a
+            # ValueError or RuntimeError, so `outbox --deliver` printed a raw
+            # traceback on any destination failure instead of the operator
+            # message and retryable nonzero exit it promises. Status only: a
+            # backend error body can echo the document back.
+            raise RuntimeError(
+                f"projection delivery failed: {type(exc).__name__}"
+                + (f" {exc.code}" if isinstance(exc, urllib.error.HTTPError) else "")
+            ) from None
+
+    def _send(self, request: Any, key: str) -> None:
         with self._opener.open(request, timeout=10) as response:
             # Bound the response and never copy backend error bodies into logs.
             data = response.read(65537)
