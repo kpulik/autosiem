@@ -245,7 +245,7 @@ surface.
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
 | SEC-015 | Low | `/health` leaks db/rules paths | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
 | SEC-016 | Low | Deep/oversized JSON → 500/memory; plaintext at rest + umask perms | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
-| SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
+| SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**, extended to both API connectors **2026-09-14**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py`; `connectors.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
 | Verified clean | — | Search DSL → parameterized SQL (no injection) | `storage.py` L321-393 | Keep `?`-only binding; review rule for future SQL |
 
 ---
@@ -464,8 +464,20 @@ report rather than failing the cycle.
 **Still open:** no signature or pinning on either feed, and no SSRF allow-list.
 HTTPS raises the bar to a CA-trust compromise; it does not make a fetched feed
 trustworthy. Both remain worth doing before any auto-refresh runs unattended in
-production. `connectors.py` (Okta API) and `backends.py` (ClickHouse/OpenSearch)
-are deliberately not covered: the first already targets an HTTPS SaaS endpoint,
-and the second commonly runs on plaintext inside a trusted network.
+production.
+
+**Amended 2026-09-14:** `connectors.py` was originally left out on the grounds
+that the Okta connector "already targets an HTTPS SaaS endpoint". That reasoning
+was wrong. The org URL is operator-supplied configuration and nothing enforced
+the scheme, so `--url http://...` would have sent the `SSWS` API token and the
+whole audit log in cleartext. Both API-native connectors now route through
+`require_https`, and loopback is not exempt for either: an org's audit log is
+remote by definition, unlike the local model server the LLM path allows. Tests
+in `test_okta_api_connector.py` and `test_github_api_connector.py` cover it.
+
+`backends.py` (ClickHouse/OpenSearch) is still deliberately not covered: it
+commonly runs on plaintext inside a trusted network. Note that the PostgreSQL
+outbox projection added in 2026-09 takes the stricter line for the same
+destinations, requiring HTTPS outside loopback (`projections.EventProjection`).
 
 Covered by `tests/test_net_policy.py` (20 tests).

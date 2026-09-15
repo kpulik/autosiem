@@ -1,0 +1,14 @@
+// Source-control repository destruction — covers MITRE ATT&CK T1485 (Data Destruction)
+{
+  "id": "AUTO-IMPACT-002",
+  "name": "Source repository destroyed or transferred out",
+  "description": "Detects deletion or outbound transfer of a source repository in a SaaS SCM audit log (GitHub repo.destroy / repo.transfer). Destroying source is both data destruction and evidence destruction, and a transfer moves the code somewhere the org no longer audits. Legitimate cleanup exists, so tune with an allowlist of maintainers or archive workflows.",
+  "severity": "high",
+  "risk_points": 70,
+  "selection": {
+    "category": "cloud",
+    "action": {"contains_any": ["repo.destroy", "repo.transfer", "repository.destroy", "repo.delete"]}
+  },
+  "mitre_attack": ["T1485"],
+  "tags": ["cloud", "scm", "impact", "destruction"]
+}

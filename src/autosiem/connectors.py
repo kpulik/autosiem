@@ -762,8 +762,9 @@ class OktaApiConnector(BaseConnector):
             "Accept": "application/json",
             "User-Agent": "AutoSIEM",
         }
+        target = require_https(url, what="the Okta System Log")
         for attempt in range(1, OKTA_MAX_RETRIES + 1):
-            status, response_headers, body = self._transport(url, headers)
+            status, response_headers, body = self._transport(target, headers)
             lowered = {key.lower(): value for key, value in response_headers.items()}
             if status == 429 or 500 <= status < 600:
                 if attempt == OKTA_MAX_RETRIES:
@@ -811,7 +812,7 @@ class OktaApiConnector(BaseConnector):
             self.last_error = None
         except ConnectorAuthError as exc:
             self.last_error = str(exc)
-        except (RuntimeError, urllib.error.URLError, OSError) as exc:
+        except (InsecureURLError, RuntimeError, urllib.error.URLError, OSError) as exc:
             self.last_error = f"{type(exc).__name__}: {exc}"
         return self._record(events)
 
