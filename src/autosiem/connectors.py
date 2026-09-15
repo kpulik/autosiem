@@ -21,6 +21,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .net import InsecureURLError, require_https
+
 
 @dataclass(slots=True)
 class ConnectorHealth:
@@ -842,6 +844,270 @@ def _urllib_get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str],
         return exc.code, dict(exc.headers.items() if exc.headers else {}), body
 
 
+#: GitHub's own API host. Override for GitHub Enterprise Server, whose API
+#: lives under ``https://<host>/api/v3``.
+GITHUB_API_DEFAULT_URL = "https://api.github.com"
+#: Audit-log page size. 100 is GitHub's documented maximum.
+GITHUB_DEFAULT_PER_PAGE = 100
+#: Safety bound on pages followed in a single poll.
+GITHUB_DEFAULT_MAX_PAGES = 10
+#: How far back a first-ever poll reaches when no cursor exists yet.
+GITHUB_DEFAULT_LOOKBACK_HOURS = 24
+#: Attempts for a rate-limited or transient request before giving up.
+GITHUB_MAX_RETRIES = 3
+#: Never sleep longer than this on a 429, however far out the reset header is.
+GITHUB_MAX_BACKOFF_SECONDS = 60.0
+#: Recently delivered ``_document_id`` values kept to suppress the replay
+#: window described in :class:`GitHubApiConnector`.
+GITHUB_SEEN_IDS = 1000
+#: Audit-log records carry this stable unique id.
+GITHUB_ID_FIELD = "_document_id"
+
+
+class GitHubApiConnector(BaseConnector):
+    """Polls the GitHub organization audit log API directly (no file export).
+
+    Config:
+      ``org``          organization login, required
+      ``url``          API base (default ``https://api.github.com``; for GHES
+                       use ``https://<host>/api/v3``)
+      ``token``        API token; prefer ``token_env`` so it stays out of argv
+      ``token_env``    env var holding the token (default
+                       ``AUTOSIEM_GITHUB_TOKEN``)
+      ``state_path``   where the cursor and seen-id window are persisted
+      ``include``      ``web``, ``git`` or ``all`` (default ``all``)
+      ``per_page``     page size (default 100, GitHub's maximum)
+      ``max_pages``    pages per poll (default 10)
+      ``lookback_hours`` how far back the very first poll reaches (default 24)
+
+    Two things differ from :class:`OktaApiConnector`, which is otherwise the
+    template for this class.
+
+    Okta's ``rel="next"`` link stays valid forever and returns an empty page
+    when there is nothing new, so the cursor alone is a complete resume point.
+    GitHub instead *omits* the Link header once you catch up, which leaves no
+    cursor covering the final page. Re-requesting the last cursor we do have
+    would re-deliver that page, so the ids of recently delivered records are
+    persisted alongside the cursor and filtered out on the next poll. Replay is
+    suppressed rather than risked, because nothing downstream deduplicates.
+
+    GitHub also answers rate limiting with 403 as well as 429, and 403 is the
+    same status it uses for a bad token. They are told apart by the rate-limit
+    headers, so a throttled poll backs off instead of reporting bad credentials.
+
+    The audit log API requires GitHub Enterprise Cloud and a token with
+    ``read:audit_log``. A 404 usually means one of those is missing rather than
+    a wrong org name.
+    """
+
+    name = "github-api"
+    mapper = staticmethod(github_to_raw)
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        super().__init__(config)
+        self.org = str(self.config.get("org") or "").strip()
+        self.base_url = str(self.config.get("url") or GITHUB_API_DEFAULT_URL).rstrip("/")
+        self.token_env = str(self.config.get("token_env") or "AUTOSIEM_GITHUB_TOKEN")
+        self._token = self.config.get("token") or os.environ.get(self.token_env)
+        self.include = str(self.config.get("include") or "all")
+        # "limit" is the CLI's page-size flag, shared with the Okta connector.
+        requested = self.config.get("per_page") or self.config.get("limit") or GITHUB_DEFAULT_PER_PAGE
+        self.per_page = min(int(requested), GITHUB_DEFAULT_PER_PAGE)
+        self.max_pages = int(self.config.get("max_pages") or GITHUB_DEFAULT_MAX_PAGES)
+        self.lookback_hours = int(self.config.get("lookback_hours") or GITHUB_DEFAULT_LOOKBACK_HOURS)
+        raw_state = self.config.get("state_path")
+        self.state_path: Path | None = Path(raw_state) if raw_state else None
+        # Injected in tests; production uses urllib.
+        self._transport: Callable[[str, dict[str, str]], tuple[int, dict[str, str], str]] = (
+            self.config.get("transport") or _urllib_get
+        )
+        self._sleep: Callable[[float], None] = self.config.get("sleep") or time.sleep
+        self._cursor: str | None = None
+        self._seen: list[str] = []
+        self._state_loaded = False
+
+    # -- credentials -------------------------------------------------------
+    def _require_token(self) -> str:
+        if not self._token:
+            raise ConnectorAuthError(
+                f"no GitHub API token: set {self.token_env} or pass token in the connector config"
+            )
+        return str(self._token)
+
+    # -- cursor persistence ------------------------------------------------
+    def _load_state(self) -> None:
+        if self._state_loaded:
+            return
+        self._state_loaded = True
+        if not (self.state_path and self.state_path.exists()):
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        cursor = data.get("next")
+        self._cursor = str(cursor) if cursor else None
+        seen = data.get("seen")
+        if isinstance(seen, list):
+            self._seen = [str(item) for item in seen][-GITHUB_SEEN_IDS:]
+
+    def _save_state(self) -> None:
+        if not self.state_path:
+            return
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(
+                json.dumps({
+                    "next": self._cursor,
+                    "seen": self._seen[-GITHUB_SEEN_IDS:],
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }, indent=2),
+                encoding="utf-8",
+            )
+        except OSError:
+            # Losing the cursor costs a replay, not correctness; never fail a poll.
+            pass
+
+    def _start_url(self) -> str:
+        self._load_state()
+        if self._cursor:
+            return self._cursor
+        since = self.config.get("since")
+        if not since:
+            start = datetime.now(timezone.utc) - timedelta(hours=self.lookback_hours)
+            since = start.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        query = urllib.parse.urlencode({
+            "include": self.include,
+            "order": "asc",
+            "per_page": self.per_page,
+            "phrase": f"created:>={since}",
+        })
+        return f"{self.base_url}/orgs/{urllib.parse.quote(self.org, safe='')}/audit-log?{query}"
+
+    # -- HTTP --------------------------------------------------------------
+    def _request(self, url: str) -> tuple[list[dict[str, Any]], str | None]:
+        """One page, with bounded retry on rate limiting and transient errors."""
+        headers = {
+            "Authorization": f"Bearer {self._require_token()}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "AutoSIEM",
+        }
+        target = require_https(url, what="the GitHub audit log")
+        for attempt in range(1, GITHUB_MAX_RETRIES + 1):
+            status, response_headers, body = self._transport(target, headers)
+            lowered = {key.lower(): value for key, value in response_headers.items()}
+            if status == 429 or 500 <= status < 600 or (status == 403 and _github_rate_limited(lowered)):
+                if attempt == GITHUB_MAX_RETRIES:
+                    raise RuntimeError(f"GitHub API returned {status} after {attempt} attempts")
+                self._sleep(_github_backoff_seconds(lowered, attempt))
+                continue
+            if status in (401, 403):
+                raise ConnectorAuthError(f"GitHub API rejected the token ({status})")
+            if status == 404:
+                raise RuntimeError(
+                    f"GitHub API returned 404 for org {self.org!r}: the audit log API needs "
+                    "GitHub Enterprise Cloud and a token with read:audit_log"
+                )
+            if status >= 400:
+                raise RuntimeError(f"GitHub API returned {status}")
+            try:
+                payload = json.loads(body) if body.strip() else []
+            except ValueError as exc:
+                raise RuntimeError(f"GitHub API returned invalid JSON: {exc}") from exc
+            records = [item for item in payload if isinstance(item, dict)] if isinstance(payload, list) else []
+            return records, _parse_next_link(lowered.get("link", ""))
+        raise RuntimeError("GitHub API request exhausted its retries")
+
+    def _unseen(self, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Drop records already delivered, and remember the ones that are new."""
+        known = set(self._seen)
+        fresh = []
+        for record in records:
+            identifier = record.get(GITHUB_ID_FIELD)
+            if identifier is None:
+                fresh.append(record)
+                continue
+            identifier = str(identifier)
+            if identifier in known:
+                continue
+            known.add(identifier)
+            self._seen.append(identifier)
+            fresh.append(record)
+        del self._seen[:-GITHUB_SEEN_IDS]
+        return fresh
+
+    # -- BaseConnector -----------------------------------------------------
+    def parse(self, raw: str) -> dict[str, Any]:
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("connector record must be a JSON object")
+        return self.mapper(value)
+
+    def poll(self) -> list[dict[str, Any]]:
+        if not self.org:
+            self.last_error = "no GitHub org configured"
+            return self._record([])
+        events: list[dict[str, Any]] = []
+        url: str | None = self._start_url()
+        try:
+            for _ in range(self.max_pages):
+                if not url:
+                    break
+                records, next_url = self._request(url)
+                events.extend(self.mapper(record) for record in self._unseen(records))
+                # Keep the last cursor when GitHub stops sending one: it is the
+                # only resume point we have, and _unseen covers the overlap.
+                if next_url:
+                    self._cursor = next_url
+                if not records:
+                    break
+                url = next_url
+            self.last_error = None
+        except ConnectorAuthError as exc:
+            self.last_error = str(exc)
+        except (InsecureURLError, RuntimeError, urllib.error.URLError, OSError) as exc:
+            self.last_error = f"{type(exc).__name__}: {exc}"
+        self._save_state()
+        return self._record(events)
+
+
+def _github_rate_limited(headers: dict[str, str]) -> bool:
+    """True when a 403 is throttling rather than a rejected credential.
+
+    GitHub answers both with 403, so the rate-limit headers are the only signal
+    that backing off will help.
+    """
+    if headers.get("retry-after"):
+        return True
+    return headers.get("x-ratelimit-remaining") == "0"
+
+
+def _github_backoff_seconds(headers: dict[str, str], attempt: int) -> float:
+    """Seconds to wait before retrying, from GitHub's own headers.
+
+    ``retry-after`` is a delta in seconds and ``x-ratelimit-reset`` is an epoch
+    timestamp, so the two are read differently rather than interchangeably.
+    """
+    retry_after = headers.get("retry-after")
+    if retry_after:
+        try:
+            return min(max(float(retry_after), 0.0), GITHUB_MAX_BACKOFF_SECONDS)
+        except ValueError:
+            pass
+    reset = headers.get("x-ratelimit-reset")
+    if reset:
+        try:
+            wait = float(reset) - time.time()
+            if wait > 0:
+                return min(wait, GITHUB_MAX_BACKOFF_SECONDS)
+        except ValueError:
+            pass
+    return min(float(2 ** (attempt - 1)), GITHUB_MAX_BACKOFF_SECONDS)
+
+
 class ConnectorRegistry:
     """Name -> connector factory, so the CLI/API can drive any connector."""
 
@@ -872,3 +1138,4 @@ registry.register(ZeekConnector.name, ZeekConnector)
 registry.register(SuricataConnector.name, SuricataConnector)
 registry.register(AssetConnector.name, AssetConnector)
 registry.register(OktaApiConnector.name, OktaApiConnector)
+registry.register(GitHubApiConnector.name, GitHubApiConnector)

@@ -164,10 +164,10 @@ def main() -> None:
     poll.add_argument("--connector", default="file", help=f"Connector name, one of: {', '.join(registry.names())}")
     poll.add_argument("--path", help="Connector path (a .jsonl file or a directory of .jsonl files); file-based connectors only")
     poll.add_argument("--url", help="Org/API base URL for API-native connectors, e.g. https://dev-123.okta.com")
+    poll.add_argument("--org", help="Organization login for org-scoped connectors, e.g. github-api")
     poll.add_argument(
         "--token-env",
-        default="AUTOSIEM_OKTA_TOKEN",
-        help="Environment variable holding the API token. The token is never taken as an argument so it stays out of shell history and the process list.",
+        help="Environment variable holding the API token (default: the connector's own, AUTOSIEM_OKTA_TOKEN or AUTOSIEM_GITHUB_TOKEN). The token is never taken as an argument so it stays out of shell history and the process list.",
     )
     poll.add_argument("--state", help="Where to persist the API pagination cursor (default: alongside --db)")
     poll.add_argument("--since", help="ISO timestamp for the first API poll (default: 24h ago)")
@@ -688,6 +688,8 @@ def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
         config["path"] = args.path
     if getattr(args, "url", None):
         config["url"] = args.url
+    if getattr(args, "org", None):
+        config["org"] = args.org
     if getattr(args, "token_env", None):
         config["token_env"] = args.token_env
     if getattr(args, "since", None):
@@ -699,7 +701,7 @@ def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
     state = getattr(args, "state", None)
     if state:
         config["state_path"] = state
-    elif getattr(args, "url", None):
+    elif getattr(args, "url", None) or getattr(args, "org", None):
         # Default the cursor next to the database so restarts resume cleanly.
         config["state_path"] = str(Path(args.db).parent / f"{args.connector}_cursor.json")
     return config
