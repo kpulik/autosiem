@@ -830,11 +830,15 @@ def _okta_backoff_seconds(headers: dict[str, str], attempt: int) -> float:
     return min(float(2 ** (attempt - 1)), OKTA_MAX_BACKOFF_SECONDS)
 
 
-def _urllib_get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str], str]:
+def _urllib_get(url: str, headers: dict[str, str], timeout: float | None = None) -> tuple[int, dict[str, str], str]:
     """Stdlib GET returning ``(status, headers, body)``; no third-party deps."""
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request) as response:
+        if timeout is None:
+            response = urllib.request.urlopen(request)
+        else:
+            response = urllib.request.urlopen(request, timeout=timeout)
+        with response:
             return response.status, dict(response.headers.items()), response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = ""
@@ -858,6 +862,8 @@ GITHUB_DEFAULT_LOOKBACK_HOURS = 24
 GITHUB_MAX_RETRIES = 3
 #: Never sleep longer than this on a 429, however far out the reset header is.
 GITHUB_MAX_BACKOFF_SECONDS = 60.0
+#: Production HTTP timeout for a single GitHub audit-log request.
+GITHUB_HTTP_TIMEOUT_SECONDS = 10.0
 #: Recently delivered ``_document_id`` values kept to suppress the replay
 #: window described in :class:`GitHubApiConnector`.
 GITHUB_SEEN_IDS = 1000
@@ -896,9 +902,9 @@ class GitHubApiConnector(BaseConnector):
     same status it uses for a bad token. They are told apart by the rate-limit
     headers, so a throttled poll backs off instead of reporting bad credentials.
 
-    The audit log API requires GitHub Enterprise Cloud and a token with
-    ``read:audit_log``. A 404 usually means one of those is missing rather than
-    a wrong org name.
+    The audit log API requires GitHub Enterprise Cloud or GitHub Enterprise
+    Server and a token with ``read:audit_log``. A 404 usually means one of
+    those is missing rather than a wrong org name.
     """
 
     name = "github-api"
@@ -914,13 +920,13 @@ class GitHubApiConnector(BaseConnector):
         # "limit" is the CLI's page-size flag, shared with the Okta connector.
         requested = self.config.get("per_page") or self.config.get("limit") or GITHUB_DEFAULT_PER_PAGE
         self.per_page = min(int(requested), GITHUB_DEFAULT_PER_PAGE)
-        self.max_pages = int(self.config.get("max_pages") or GITHUB_DEFAULT_MAX_PAGES)
+        self.max_pages = max(1, int(self.config.get("max_pages") or GITHUB_DEFAULT_MAX_PAGES))
         self.lookback_hours = int(self.config.get("lookback_hours") or GITHUB_DEFAULT_LOOKBACK_HOURS)
         raw_state = self.config.get("state_path")
         self.state_path: Path | None = Path(raw_state) if raw_state else None
         # Injected in tests; production uses urllib.
-        self._transport: Callable[[str, dict[str, str]], tuple[int, dict[str, str], str]] = (
-            self.config.get("transport") or _urllib_get
+        self._transport: Callable[[str, dict[str, str]], tuple[int, dict[str, str], str]] = self.config.get("transport") or (
+            lambda url, headers: _urllib_get(url, headers, timeout=GITHUB_HTTP_TIMEOUT_SECONDS)
         )
         self._sleep: Callable[[float], None] = self.config.get("sleep") or time.sleep
         self._cursor: str | None = None
@@ -1010,7 +1016,7 @@ class GitHubApiConnector(BaseConnector):
             if status == 404:
                 raise RuntimeError(
                     f"GitHub API returned 404 for org {self.org!r}: the audit log API needs "
-                    "GitHub Enterprise Cloud and a token with read:audit_log"
+                    "GitHub Enterprise Cloud or GitHub Enterprise Server and a token with read:audit_log"
                 )
             if status >= 400:
                 raise RuntimeError(f"GitHub API returned {status}")

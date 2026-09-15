@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -702,8 +703,15 @@ def _connector_config(args: argparse.Namespace) -> dict[str, Any]:
     if state:
         config["state_path"] = state
     elif getattr(args, "url", None) or getattr(args, "org", None):
-        # Default the cursor next to the database so restarts resume cleanly.
-        config["state_path"] = str(Path(args.db).parent / f"{args.connector}_cursor.json")
+        # Default the cursor next to the database so restarts resume cleanly,
+        # but keep API endpoints/orgs isolated from one another.
+        identity = "|".join([
+            str(args.connector),
+            str(getattr(args, "url", "") or ""),
+            str(getattr(args, "org", "") or ""),
+        ])
+        suffix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+        config["state_path"] = str(Path(args.db).parent / f"{args.connector}_{suffix}_cursor.json")
     return config
 
 
