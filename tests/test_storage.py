@@ -7,7 +7,23 @@ import pytest
 from autosiem.pipeline import AutoSIEMPipeline, PipelineResult
 from autosiem.rules import load_rules
 from autosiem.storage import AutoSIEMStorage
+from autosiem.storage_ports import (
+    BaselineStore,
+    ControlPlaneStore,
+    EventQueryStore,
+    IncidentQueryStore,
+)
 from autosiem.suppression import Suppression
+
+
+def test_sqlite_storage_satisfies_the_first_phase_storage_ports(tmp_path: Path) -> None:
+    """Future stores must preserve the narrow ports, not SQLite internals."""
+    store = AutoSIEMStorage(tmp_path / "ports.db")
+
+    assert isinstance(store, EventQueryStore)
+    assert isinstance(store, IncidentQueryStore)
+    assert isinstance(store, BaselineStore)
+    assert isinstance(store, ControlPlaneStore)
 
 
 def test_storage_persists_pipeline_result_and_decisions(tmp_path: Path) -> None:

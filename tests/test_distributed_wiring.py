@@ -7,6 +7,7 @@ counts and never checked that the queue and archive actually did anything.
 from __future__ import annotations
 
 import json
+import pytest
 from typing import Any
 
 from autosiem.bus import DurableQueue
@@ -188,3 +189,42 @@ def test_replay_with_only_markers_acks_them_and_reports_nothing(tmp_path) -> Non
 def test_replay_without_a_queue_is_a_no_op(tmp_path) -> None:
     pipeline = DistributedPipeline(_config(tmp_path), [], db_path=str(tmp_path / "d.db"))
     assert pipeline.replay_from_queue()["replayed"] == 0
+
+
+def test_failed_persistence_keeps_input_pending_and_replay_saves_before_ack(tmp_path):
+    config = _config(tmp_path, queue_path=str(tmp_path / "queue.db"))
+    assert config.queue_path is not None
+    queue = DurableQueue(config.queue_path)
+    saved = []
+    fail = True
+    def persist(result):
+        nonlocal fail
+        assert queue.pending() == len(LINES)
+        if fail:
+            fail = False
+            raise RuntimeError("database unavailable")
+        saved.append(result)
+    pipeline = DistributedPipeline(config, [], pipeline=CountingPipeline(), persist=persist, transactional_outbox=True)
+    with pytest.raises(RuntimeError, match="unavailable"):
+        pipeline.run(LINES)
+    assert queue.pending() == len(LINES)
+    assert pipeline.replay_from_queue()["replayed"] == len(LINES)
+    assert len(saved) == 1 and queue.pending() == 0
+
+
+def test_postgres_outbox_does_not_dual_write_the_alternate_backend(tmp_path, monkeypatch):
+    monkeypatch.setattr(DistributedPipeline, "_make_backend", lambda *_: pytest.fail("direct projection write"))
+    config = _config(tmp_path, backend_type="opensearch", queue_path=str(tmp_path / "queue.db"))
+    saved = []
+    pipeline = DistributedPipeline(config, [], pipeline=CountingPipeline(), persist=saved.append, transactional_outbox=True)
+    pipeline.run(LINES)
+    assert len(saved) == 1
+
+
+def test_postgres_no_save_is_rejected_before_enqueue(tmp_path):
+    config = _config(tmp_path, queue_path=str(tmp_path / "queue.db"))
+    assert config.queue_path is not None
+    pipeline = DistributedPipeline(config, [], pipeline=CountingPipeline(), transactional_outbox=True)
+    with pytest.raises(ValueError, match="persistence"):
+        pipeline.run(LINES)
+    assert DurableQueue(config.queue_path).pending() == 0

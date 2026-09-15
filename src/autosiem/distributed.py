@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from .archive import ArchiveWriter, JournalFile
 from .backends import ClickHouseBackend, EventBackend, OpenSearchBackend, SqliteBackend, make_backend
@@ -86,6 +86,8 @@ class DistributedPipeline:
         rules: list[Any],
         db_path: str = "data/autosiem.db",
         pipeline: Any | None = None,
+        persist: Callable[[Any], None] | None = None,
+        transactional_outbox: bool = False,
     ) -> None:
         self.config = config
         self.rules = rules
@@ -96,6 +98,8 @@ class DistributedPipeline:
         # whose chunks would otherwise run bare pipelines and give each chunk its
         # own behavioral baseline.
         self.pipeline = pipeline
+        self.persist = persist
+        self.transactional_outbox = transactional_outbox
 
         # Initialize optional components
         self._queue: DurableQueue | None = None
@@ -119,7 +123,7 @@ class DistributedPipeline:
         if config.parallel_enabled:
             self._workers = ParserWorkerPool(workers=config.workers, rules=rules)
 
-        if config.alternate_backend:
+        if config.alternate_backend and not transactional_outbox:
             self._backend = self._make_backend(config)
 
     @staticmethod
@@ -150,15 +154,18 @@ class DistributedPipeline:
     def run(self, lines: list[str]) -> Any:
         """Archive, enqueue, process ONCE, store, ack; return the PipelineResult.
 
-        Callers persist the returned result themselves. The alternate backends
-        implement ``store_events`` only, so they hold events alongside SQLite
-        rather than replacing it - findings, incidents, investigations and the
-        audit chain still live in SQLite.
+        A supplied persistence callback commits the full result before queue
+        acknowledgement. PostgreSQL requires it and uses its transactional
+        outbox instead of a direct alternate-backend write. Library callers
+        without the callback retain responsibility for saving returned results.
         """
         from .pipeline import PipelineResult
 
         if not lines:
             return PipelineResult()
+
+        if self.transactional_outbox and self.persist is None:
+            raise ValueError("PostgreSQL durable ingest requires persistence; do not use --no-save")
 
         # Archive raw events first (for durability)
         if self._archive is not None:
@@ -187,10 +194,17 @@ class DistributedPipeline:
                         )
                     )
                 except QueueFullError:
+                    if self.persist is not None:
+                        # Nothing is acknowledged or processed. Already queued
+                        # input remains recoverable; the caller must retry the
+                        # rejected batch after draining the queue.
+                        raise
                     # Backpressure hit - process what we have queued
                     break
 
         result = self._process(lines)
+
+        self._persist(result)
 
         # Store to alternate backend if configured
         if self._backend and self.config.alternate_backend:
@@ -202,6 +216,12 @@ class DistributedPipeline:
                 self._queue.ack(offset)
 
         return result
+
+    def _persist(self, result: Any) -> None:
+        if self.persist is not None:
+            self.persist(result)
+        elif self.transactional_outbox:
+            raise ValueError("PostgreSQL distributed ingest requires result persistence before acknowledgement")
 
     def _process(self, lines: list[str]) -> Any:
         """The single processing pass: injected pipeline, workers, or default."""
@@ -237,6 +257,10 @@ class DistributedPipeline:
             return {"events": 0, "findings": 0, "incidents": 0, "replayed": 0}
 
         result = self._process(lines)
+
+        self._persist(result)
+        if self._backend and self.config.alternate_backend:
+            self._backend.store_events(result.events)
 
         # Ack all replayed messages
         for msg in pending:

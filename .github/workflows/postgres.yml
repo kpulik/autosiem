@@ -1,0 +1,34 @@
+name: PostgreSQL integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: autosiem-ci-only
+        ports:
+          - 127.0.0.1:5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install '.[api,dev,postgres]' pyright
+      - name: Full suite with disposable PostgreSQL databases
+        env:
+          # Public fixture credential for this ephemeral loopback-only service.
+          AUTOSIEM_TEST_POSTGRES_DSN: host=127.0.0.1 port=5432 dbname=postgres user=postgres password=autosiem-ci-only
+        run: PYTHONPATH=src python -m pytest tests/ -q
+      - run: pyright

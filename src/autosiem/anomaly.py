@@ -35,22 +35,10 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 from .schemas import Finding, NormalizedEvent, Severity
-
-
-@runtime_checkable
-class BaselineStore(Protocol):
-    """Anything that can persist a UEBA baseline between runs.
-
-    ``AutoSIEMStorage`` satisfies this. Without one the detector relearns from
-    zero on every invocation, which makes every entity look novel again.
-    """
-
-    def load_baseline(self, tenant_id: str | None = ...) -> dict[str, Any] | None: ...
-
-    def save_baseline(self, state: dict[str, Any], tenant_id: str | None = ...) -> None: ...
+from .storage_ports import BaselineStore
 
 # --- Signal weights --------------------------------------------------------
 POINTS_NOVEL_ACTION = 15

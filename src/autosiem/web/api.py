@@ -53,7 +53,7 @@ from autosiem.rbac import (
 from autosiem.rules import apply_rule_state, load_rules
 from autosiem.soar import SoarPlanner
 from autosiem.suppression import DEFAULT_CREATED_BY
-from autosiem.storage import DEFAULT_DB_PATH, AutoSIEMStorage
+from autosiem.storage import DEFAULT_DB_PATH, RelationalStorage, StorageConflict, open_storage
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved", "closed")
 
@@ -70,6 +70,11 @@ DEFAULT_RULE_PATH = Path(__file__).resolve().parents[3] / "rules"
 app = FastAPI(title="AutoSIEM", version="0.1.0")
 
 
+@app.exception_handler(StorageConflict)
+async def storage_conflict_handler(request: Request, exc: StorageConflict) -> JSONResponse:
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
 def _env_db_path() -> Path:
     """Resolve the storage path from the environment at call time."""
     return Path(os.environ.get("AUTOSIEM_DB", str(DEFAULT_DB_PATH)))
@@ -80,8 +85,8 @@ def _env_rule_path() -> Path:
     return Path(os.environ.get("AUTOSIEM_RULES", str(DEFAULT_RULE_PATH)))
 
 
-def get_store() -> AutoSIEMStorage:
-    return AutoSIEMStorage(_env_db_path())
+def get_store() -> RelationalStorage:
+    return open_storage(_env_db_path())
 
 
 def _form_str(form: Any, key: str) -> str | None:
@@ -671,8 +676,15 @@ def api_search_nl(request: Request, q: str, target: str = "incidents") -> dict[s
 @app.get("/metrics", response_class=PlainTextResponse)
 def metrics(request: Request) -> str:
     registry = MetricsRegistry()
-    for key, value in get_store().counts(tenant_id=_tenant(request)).items():
+    store = get_store()
+    for key, value in store.counts(tenant_id=_tenant(request)).items():
         registry.gauge(f"autosiem_{key}").set(value)
+    from autosiem.postgres import PostgresStorage
+    if isinstance(store, PostgresStorage) and os.environ.get("AUTOSIEM_BACKEND") in {"opensearch", "clickhouse"}:
+        from autosiem.projections import projection_from_env
+        projection = projection_from_env()
+        for key, value in store.outbox_stats(projection.destination, tenant_id=_tenant(request)).items():
+            registry.gauge(f"autosiem_outbox_{key}").set(value)
     return prometheus_text(registry)
 
 
