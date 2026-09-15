@@ -178,10 +178,14 @@ class PostgresStorage(RelationalStorage):
         conn.execute("insert into event_outbox(tenant_id,event_id,data) values(?,?,?) "
                      "on conflict(tenant_id,event_id) do nothing", (tenant, event_id, data))
 
-    def audit(self, conn: Any, actor: str, action: str, target: str | None, details: dict[str, Any]) -> None:
+    def audit(self, conn: Any, actor: str, action: str, target: str | None,
+              details: dict[str, Any], tenant_id: str | None = None) -> None:
+        # Signature must track RelationalStorage.audit exactly: this override
+        # silently dropped a new keyword argument and every audited write on the
+        # PostgreSQL path raised TypeError.
         # Held through COMMIT: another writer cannot hash an uncommitted tail.
         conn.execute("select pg_advisory_xact_lock(?)", (AUDIT_LOCK,))
-        super().audit(conn, actor, action, target, details)
+        super().audit(conn, actor, action, target, details, tenant_id)
 
     def _add_comment(self, conn: Any, incident_id: str, actor: str, body: str,
                      tenant_id: str | None = None) -> dict[str, Any]:
