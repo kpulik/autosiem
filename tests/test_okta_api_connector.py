@@ -318,3 +318,24 @@ def test_parse_rejects_a_non_object() -> None:
 
 def test_connector_auth_error_is_a_runtime_error() -> None:
     assert issubclass(ConnectorAuthError, RuntimeError)
+
+
+# --- transport policy (SEC-017) -------------------------------------------
+
+
+def test_plaintext_org_url_is_refused_before_any_request() -> None:
+    """This connector predated net.require_https and bypassed it."""
+    transport = FakeTransport([(200, {}, [])])
+    connector = _connector(transport, url="http://dev-123456.okta.com")
+    assert connector.poll() == []
+    assert "InsecureURLError" in connector.health().detail
+    assert transport.calls == []
+
+
+def test_loopback_is_not_exempt_for_a_remote_log_source() -> None:
+    """llm.py opts loopback into plaintext; an org's audit log never does."""
+    transport = FakeTransport([(200, {}, [])])
+    connector = _connector(transport, url="http://localhost:8080")
+    assert connector.poll() == []
+    assert "InsecureURLError" in connector.health().detail
+    assert transport.calls == []

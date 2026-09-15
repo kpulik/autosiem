@@ -27,7 +27,7 @@ def _json(out: str) -> dict:
 def test_rules_lists_all_rules(capsys, monkeypatch, tmp_path) -> None:
     out = _run_cli(capsys, monkeypatch, "rules", "--rules", str(RULES_DIR), "--db", str(tmp_path / "rules.db"))
     payload = _json(out)
-    assert payload["total"] == 16
+    assert payload["total"] == 19
     rule_ids = {rule["rule_id"] for rule in payload["rules"]}
     assert {"AUTO-AUTH-001", "AUTO-CRED-002", "AUTO-IMPACT-001"} <= rule_ids
     assert all(rule["enabled"] for rule in payload["rules"])
@@ -103,7 +103,7 @@ def test_update_reports_rules_and_coverage(capsys, monkeypatch, tmp_path) -> Non
     db = tmp_path / "update.db"
     out = _run_cli(capsys, monkeypatch, "update", "--rules", str(RULES_DIR), "--db", str(db))
     payload = _json(out)
-    assert payload["rules_loaded"] == 16
+    assert payload["rules_loaded"] == 19
     # Gaps are reported against the watchlist and alongside its size, so the
     # zero cannot be read as full ATT&CK coverage.
     assert payload["watchlist_gap_count"] == 0

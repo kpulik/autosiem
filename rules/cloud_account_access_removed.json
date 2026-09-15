@@ -1,0 +1,14 @@
+// Organization access removal — covers MITRE ATT&CK T1531 (Account Access Removal)
+{
+  "id": "AUTO-IMPACT-003",
+  "name": "Organization member or collaborator access removed",
+  "description": "Detects removal of a member, outside collaborator or team member from a SaaS organization (GitHub org.remove_member and friends). Adversaries lock defenders out to slow response; this is also ordinary offboarding, which is why it is medium rather than high. Correlation is what makes it interesting: removals alongside repository or branch-protection changes by the same actor are the signal.",
+  "severity": "medium",
+  "risk_points": 40,
+  "selection": {
+    "category": "cloud",
+    "action": {"contains_any": ["org.remove_member", "org.remove_outside_collaborator", "org.remove_billing_manager", "team.remove_member", "repo.remove_member"]}
+  },
+  "mitre_attack": ["T1531"],
+  "tags": ["cloud", "scm", "impact", "identity"]
+}

@@ -90,6 +90,36 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
             {"category": "cloud", "action": "CreateUser", "cloud_account": "prod", "resource": "AdminRole"},
         ],
     },
+    "AUTO-IMPACT-002": {
+        "fires": [
+            {"category": "cloud", "action": "repo.destroy", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
+            {"category": "cloud", "action": "repo.transfer", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
+        ],
+        "silent": [
+            {"category": "cloud", "action": "repo.create", "user": "alice", "cloud_account": "acme", "resource": "acme/payments"},
+            {"category": "cloud", "action": "repo.archived", "user": "alice", "cloud_account": "acme", "resource": "acme/payments"},
+        ],
+    },
+    "AUTO-DEFEV-003": {
+        "fires": [
+            {"category": "cloud", "action": "protected_branch.destroy", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
+            {"category": "cloud", "action": "protected_branch.policy_override", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
+        ],
+        "silent": [
+            {"category": "cloud", "action": "protected_branch.create", "user": "alice", "cloud_account": "acme", "resource": "acme/payments"},
+            {"category": "cloud", "action": "repo.destroy", "user": "mallory", "cloud_account": "acme", "resource": "acme/payments"},
+        ],
+    },
+    "AUTO-IMPACT-003": {
+        "fires": [
+            {"category": "cloud", "action": "org.remove_member", "user": "mallory", "cloud_account": "acme"},
+            {"category": "cloud", "action": "team.remove_member", "user": "mallory", "cloud_account": "acme"},
+        ],
+        "silent": [
+            {"category": "cloud", "action": "org.add_member", "user": "alice", "cloud_account": "acme"},
+            {"category": "cloud", "action": "org.invite_member", "user": "alice", "cloud_account": "acme"},
+        ],
+    },
     "AUTO-EMAIL-001": {
         "fires": [
             {"category": "email", "action": "phishing_email_received", "user": "alice"},
