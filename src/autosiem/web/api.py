@@ -1200,19 +1200,26 @@ def _page(title: str, body: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{_esc(title)}</title>
   <style>
-    :root {{ color-scheme: dark; --bg:#09111f; --panel:#111c2f; --card:#17243a; --text:#e9f0ff; --muted:#9fb0cc; --accent:#7dd3fc; --danger:#fb7185; --ok:#86efac; }}
-    body {{ margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background: radial-gradient(circle at top left, #18375f, var(--bg) 42%); color:var(--text); }}
+    :root {{ color-scheme: dark; --bg:#09111f; --panel:#111c2f; --card:#17243a; --text:#e9f0ff; --muted:#9fb0cc; --accent:#7dd3fc; --danger:#fb7185; --ok:#86efac;
+      /* A console, not a dashboard: technical faces for anything that names
+         a thing (headings, labels, identifiers), a humanist face for prose.
+         System stacks only - no webfont request, so this renders the same in
+         an air-gapped SOC as it does here. */
+      --font-display: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+      --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", sans-serif; }}
+    body {{ margin:0; font-family: var(--font-body); background: radial-gradient(circle at top left, #18375f, var(--bg) 42%); color:var(--text); }}
     main {{ width:min(1120px, calc(100% - 32px)); margin:32px auto; }}
     .hero, .panel {{ background:rgba(17,28,47,.88); border:1px solid rgba(125,211,252,.18); border-radius:24px; padding:28px; box-shadow:0 24px 80px rgba(0,0,0,.25); }}
     .hero {{ display:flex; align-items:center; justify-content:space-between; gap:24px; }}
-    h1 {{ font-size:42px; line-height:1; margin:8px 0 12px; }} h2 {{ margin:0 0 10px; }}
+    h1 {{ font-family:var(--font-display); font-size:40px; line-height:1.04; letter-spacing:-.03em; margin:8px 0 12px; }}
+    h2, h3 {{ font-family:var(--font-display); letter-spacing:-.015em; }} h2 {{ margin:0 0 10px; }}
     p, small {{ color:var(--muted); }} a {{ color:inherit; text-decoration:none; }}
-    .eyebrow {{ color:var(--accent); text-transform:uppercase; letter-spacing:.14em; font-size:12px; font-weight:700; }}
+    .eyebrow {{ font-family:var(--font-display); color:var(--accent); text-transform:uppercase; letter-spacing:.14em; font-size:12px; font-weight:700; }}
     button {{ background:linear-gradient(135deg,#38bdf8,#818cf8); color:white; border:0; border-radius:999px; padding:10px 16px; font-weight:700; cursor:pointer; }}
     button.secondary {{ background:#27364f; }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin:20px 0; }}
     .card {{ background:rgba(23,36,58,.92); border:1px solid rgba(255,255,255,.08); border-radius:20px; padding:20px; transition:.15s ease; }} .card:hover {{ transform:translateY(-2px); border-color:var(--accent); }}
-    .badge {{ display:inline-block; background:rgba(125,211,252,.14); color:var(--accent); border:1px solid rgba(125,211,252,.26); border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; }}
+    .badge {{ font-family:var(--font-display); display:inline-block; background:rgba(125,211,252,.14); color:var(--accent); border:1px solid rgba(125,211,252,.26); border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; }}
     .chips span {{ display:inline-block; margin:4px; padding:6px 10px; border-radius:999px; background:#23324c; color:#cfe0ff; }}
     .proposal {{ display:grid; grid-template-columns:1fr auto auto auto; align-items:center; gap:12px; padding:14px 0; border-top:1px solid rgba(255,255,255,.08); }}
     .search {{ display:grid; grid-template-columns:1fr 1fr auto; gap:10px; margin:18px 0; }}
@@ -1231,13 +1238,13 @@ def _page(title: str, body: str) -> str:
     .timeline-item {{ display:grid; grid-template-columns:18px 1fr; gap:14px; padding:14px 0; border-top:1px solid rgba(255,255,255,.08); }}
     .timeline-item h3 {{ margin:4px 0; }} .dot {{ width:10px; height:10px; margin-top:7px; border-radius:999px; background:var(--accent); box-shadow:0 0 18px var(--accent); }}
     .links {{ margin:18px 0; }} .empty, .row {{ background:rgba(17,28,47,.8); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; overflow:auto; }}
-    pre {{ white-space:pre-wrap; color:#dbeafe; }}
+    pre {{ font-family:var(--font-display); white-space:pre-wrap; color:#dbeafe; }}
     .search-nl {{ grid-template-columns:1fr auto; }}
     .translation {{ margin:18px 0; padding:22px; }}
     .translation .chips span {{ background:#1b2a43; border:1px solid rgba(125,211,252,.22); }}
     .translation .chips strong {{ color:var(--accent); margin-right:6px; font-weight:700;
       text-transform:uppercase; letter-spacing:.08em; font-size:11px; }}
-    .copy {{ font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:13px;
+    .copy {{ font-family:var(--font-display); font-size:13px;
       border-radius:12px; margin-top:12px; max-width:100%; overflow:hidden;
       text-overflow:ellipsis; white-space:nowrap; }}
     .copy:hover {{ background:#33445f; }}

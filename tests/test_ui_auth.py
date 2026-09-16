@@ -243,3 +243,35 @@ def test_incident_page_labels_a_model_sourced_decision(tmp_path, monkeypatch):
     assert "LLM-assisted" in page
     assert "reported by a language model" in page
     assert "cannot authorize autonomous response" in page
+
+
+# -- typography -------------------------------------------------------------
+
+def test_the_ui_never_ships_a_banned_display_font() -> None:
+    """Inter, Roboto and Arial are barred as display faces by house style."""
+    from autosiem.web.api import _page
+
+    css = _page("t", "<p>body</p>")
+    for banned in ("Inter", "Roboto", "Arial"):
+        assert banned not in css, f"{banned} is back in the page shell"
+
+
+def test_the_ui_requests_no_external_font() -> None:
+    """A SOC console must render in an air-gapped network.
+
+    A webfont link would also tell the font host every time an analyst opens
+    the dashboard, which is a disclosure a security tool should not make.
+    """
+    from autosiem.web.api import _page
+
+    css = _page("t", "<p>body</p>")
+    for remote in ("fonts.googleapis.com", "fonts.gstatic.com", "@import", "@font-face"):
+        assert remote not in css, f"the shell fetches {remote}"
+
+
+def test_the_type_system_is_driven_by_custom_properties() -> None:
+    from autosiem.web.api import _page
+
+    css = _page("t", "<p>body</p>")
+    assert "--font-display:" in css and "--font-body:" in css
+    assert "font-family: var(--font-body)" in css
