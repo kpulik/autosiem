@@ -1200,60 +1200,94 @@ def _page(title: str, body: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{_esc(title)}</title>
   <style>
-    :root {{ color-scheme: dark; --bg:#09111f; --panel:#111c2f; --card:#17243a; --text:#e9f0ff; --muted:#9fb0cc; --accent:#7dd3fc; --danger:#fb7185; --ok:#86efac;
+    /* Palette in OKLCH. Every surface shares one hue (261) and its lightness
+       steps are evenly spaced 0.05 apart - that even spacing is the whole
+       point, and it is what the old hex ramp could not express, because sRGB
+       lightness is not perceptual. Each token carries a hex fallback first:
+       a browser that does not parse oklch() keeps the earlier declaration, so
+       an older pinned SOC browser still renders the intended colours. */
+    :root {{
+      color-scheme: dark;
+      --bg:#08101e;            --bg:oklch(0.175 0.032 261);
+      --panel:#111c2e;         --panel:oklch(0.225 0.040 261);
+      --card:#1b283e;          --card:oklch(0.275 0.046 261);
+      --raised:#25344e;        --raised:oklch(0.325 0.050 261);
+      --text:#e8f0ff;          --text:oklch(0.954 0.022 261);
+      --dim:#d1e0fb;           --dim:oklch(0.904 0.040 261);
+      --muted:#9fb0cc;         --muted:oklch(0.753 0.045 261);
+      /* One dominant brand accent. The status colours are siblings of it, and
+         danger deliberately carries the highest chroma: it is the alarm, so it
+         should win attention against everything else on the page. */
+      --accent:#7dd3fc;        --accent:oklch(0.828 0.101 230);
+      --accent-deep:#818cf8;   --accent-deep:oklch(0.680 0.158 277);
+      --danger:#fb7186;        --danger:oklch(0.719 0.169 13);
+      --ok:#87efab;            --ok:oklch(0.871 0.136 154);
+      --warn:#ffcf7a;          --warn:oklch(0.879 0.117 81);
+      --glow:#18375f;          --glow:oklch(0.336 0.080 256);
+      /* Lines and washes are derived from the accent and the text rather than
+         from white, so nothing drifts grey against the blue surfaces. */
+      --line:oklch(0.828 0.101 230 / 0.18);
+      --line-soft:oklch(0.954 0.022 261 / 0.09);
+      --wash:oklch(0.828 0.101 230 / 0.14);
+      --wash-edge:oklch(0.828 0.101 230 / 0.26);
+      --shadow:oklch(0 0 0 / 0.25);
       /* A console, not a dashboard: technical faces for anything that names
          a thing (headings, labels, identifiers), a humanist face for prose.
          System stacks only - no webfont request, so this renders the same in
          an air-gapped SOC as it does here. */
       --font-display: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-      --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", sans-serif; }}
-    body {{ margin:0; font-family: var(--font-body); background: radial-gradient(circle at top left, #18375f, var(--bg) 42%); color:var(--text); }}
+      --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", sans-serif;
+    }}
+    body {{ margin:0; font-family: var(--font-body); background: radial-gradient(circle at top left, var(--glow), var(--bg) 42%); color:var(--text); }}
     main {{ width:min(1120px, calc(100% - 32px)); margin:32px auto; }}
-    .hero, .panel {{ background:rgba(17,28,47,.88); border:1px solid rgba(125,211,252,.18); border-radius:24px; padding:28px; box-shadow:0 24px 80px rgba(0,0,0,.25); }}
+    .hero, .panel {{ background:var(--panel); border:1px solid var(--line); border-radius:24px; padding:28px; box-shadow:0 24px 80px var(--shadow); }}
     .hero {{ display:flex; align-items:center; justify-content:space-between; gap:24px; }}
     h1 {{ font-family:var(--font-display); font-size:40px; line-height:1.04; letter-spacing:-.03em; margin:8px 0 12px; }}
     h2, h3 {{ font-family:var(--font-display); letter-spacing:-.015em; }} h2 {{ margin:0 0 10px; }}
     p, small {{ color:var(--muted); }} a {{ color:inherit; text-decoration:none; }}
     .eyebrow {{ font-family:var(--font-display); color:var(--accent); text-transform:uppercase; letter-spacing:.14em; font-size:12px; font-weight:700; }}
-    button {{ background:linear-gradient(135deg,#38bdf8,#818cf8); color:white; border:0; border-radius:999px; padding:10px 16px; font-weight:700; cursor:pointer; }}
-    button.secondary {{ background:#27364f; }}
+    button {{ background:linear-gradient(135deg,var(--accent),var(--accent-deep)); color:var(--bg); border:0; border-radius:999px; padding:10px 16px; font-weight:700; cursor:pointer; }}
+    button.secondary {{ background:var(--raised); color:var(--dim); }}
     .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; margin:20px 0; }}
-    .card {{ background:rgba(23,36,58,.92); border:1px solid rgba(255,255,255,.08); border-radius:20px; padding:20px; transition:.15s ease; }} .card:hover {{ transform:translateY(-2px); border-color:var(--accent); }}
-    .badge {{ font-family:var(--font-display); display:inline-block; background:rgba(125,211,252,.14); color:var(--accent); border:1px solid rgba(125,211,252,.26); border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; }}
-    .chips span {{ display:inline-block; margin:4px; padding:6px 10px; border-radius:999px; background:#23324c; color:#cfe0ff; }}
-    .proposal {{ display:grid; grid-template-columns:1fr auto auto auto; align-items:center; gap:12px; padding:14px 0; border-top:1px solid rgba(255,255,255,.08); }}
+    .card {{ background:var(--card); border:1px solid var(--line-soft); border-radius:20px; padding:20px; transition:.15s ease; }} .card:hover {{ transform:translateY(-2px); border-color:var(--accent); }}
+    .badge {{ font-family:var(--font-display); display:inline-block; background:var(--wash); color:var(--accent); border:1px solid var(--wash-edge); border-radius:999px; padding:4px 10px; font-size:12px; font-weight:700; }}
+    .chips span {{ display:inline-block; margin:4px; padding:6px 10px; border-radius:999px; background:var(--raised); color:var(--dim); }}
+    .proposal {{ display:grid; grid-template-columns:1fr auto auto auto; align-items:center; gap:12px; padding:14px 0; border-top:1px solid var(--line-soft); }}
     .search {{ display:grid; grid-template-columns:1fr 1fr auto; gap:10px; margin:18px 0; }}
     .sups-form {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; margin:14px 0; }}
     .sups-form button {{ grid-column:1 / -1; }}
     .chiprow {{ display:flex; gap:8px; flex-wrap:wrap; margin:10px 0; }}
     .prov {{ display:inline-block; margin-left:8px; padding:3px 9px; border-radius:999px; font-size:12px; font-weight:700; letter-spacing:.04em; vertical-align:middle; }}
-    .prov-local {{ background:#17324a; color:#8fd0ff; border:1px solid #2b587d; }}
-    .prov-model {{ background:#3d2f14; color:#ffcf7a; border:1px solid #6d5220; }}
-    .provenance-note {{ color:#93a4bf; font-size:13px; margin-top:6px; max-width:70ch; }}
-    .chipbtn {{ background:#23324c; color:#cfe0ff; }}
-    .chipbtn.active {{ background:linear-gradient(135deg,#38bdf8,#818cf8); color:white; }}
-    .comment {{ padding:12px 0; border-top:1px solid rgba(255,255,255,.08); }}
-    select {{ background:#101b2f; color:var(--text); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:11px 14px; }}
-    input {{ background:#101b2f; color:var(--text); border:1px solid rgba(255,255,255,.12); border-radius:999px; padding:11px 14px; }}
-    .timeline-item {{ display:grid; grid-template-columns:18px 1fr; gap:14px; padding:14px 0; border-top:1px solid rgba(255,255,255,.08); }}
+    /* Provenance reads at a glance: local analysis in the brand hue, a
+       model-reported result in the warning hue, because the autonomy gate
+       treats them differently and the badge should say so. */
+    .prov-local {{ background:var(--wash); color:var(--accent); border:1px solid var(--wash-edge); }}
+    .prov-model {{ background:oklch(0.879 0.117 81 / 0.16); color:var(--warn); border:1px solid oklch(0.879 0.117 81 / 0.34); }}
+    .provenance-note {{ color:var(--muted); font-size:13px; margin-top:6px; max-width:70ch; }}
+    .chipbtn {{ background:var(--raised); color:var(--dim); }}
+    .chipbtn.active {{ background:linear-gradient(135deg,var(--accent),var(--accent-deep)); color:var(--bg); }}
+    .comment {{ padding:12px 0; border-top:1px solid var(--line-soft); }}
+    select, input {{ background:var(--panel); color:var(--text); border:1px solid var(--line-soft); border-radius:999px; padding:11px 14px; }}
+    select:focus-visible, input:focus-visible {{ outline:2px solid var(--accent); outline-offset:1px; }}
+    .timeline-item {{ display:grid; grid-template-columns:18px 1fr; gap:14px; padding:14px 0; border-top:1px solid var(--line-soft); }}
     .timeline-item h3 {{ margin:4px 0; }} .dot {{ width:10px; height:10px; margin-top:7px; border-radius:999px; background:var(--accent); box-shadow:0 0 18px var(--accent); }}
-    .links {{ margin:18px 0; }} .empty, .row {{ background:rgba(17,28,47,.8); border:1px solid rgba(255,255,255,.08); border-radius:16px; padding:16px; overflow:auto; }}
-    pre {{ font-family:var(--font-display); white-space:pre-wrap; color:#dbeafe; }}
+    .links {{ margin:18px 0; }} .empty, .row {{ background:var(--panel); border:1px solid var(--line-soft); border-radius:16px; padding:16px; overflow:auto; }}
+    pre {{ font-family:var(--font-display); white-space:pre-wrap; color:var(--dim); }}
     .search-nl {{ grid-template-columns:1fr auto; }}
     .translation {{ margin:18px 0; padding:22px; }}
-    .translation .chips span {{ background:#1b2a43; border:1px solid rgba(125,211,252,.22); }}
+    .translation .chips span {{ background:var(--card); border:1px solid var(--wash-edge); }}
     .translation .chips strong {{ color:var(--accent); margin-right:6px; font-weight:700;
       text-transform:uppercase; letter-spacing:.08em; font-size:11px; }}
     .copy {{ font-family:var(--font-display); font-size:13px;
       border-radius:12px; margin-top:12px; max-width:100%; overflow:hidden;
       text-overflow:ellipsis; white-space:nowrap; }}
-    .copy:hover {{ background:#33445f; }}
+    .copy:hover {{ background:var(--card); }}
     /* .chipbtn only carried colour; the pill shape came from the `button`
        element selector, so the same class on an <a> rendered flat. */
     a.chipbtn {{ display:inline-block; border-radius:999px; padding:10px 16px;
-      font-weight:700; border:1px solid rgba(255,255,255,.08); }}
+      font-weight:700; border:1px solid var(--line-soft); }}
     a.chipbtn:hover {{ border-color:var(--accent); }}
-    a.chipbtn.active {{ background:linear-gradient(135deg,#38bdf8,#818cf8); color:white;
+    a.chipbtn.active {{ background:linear-gradient(135deg,var(--accent),var(--accent-deep)); color:var(--bg);
       border-color:transparent; }}
   </style>
 </head>
