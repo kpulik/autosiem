@@ -1,0 +1,17 @@
+// Remote System Discovery — covers MITRE ATT&CK T1018
+{
+  "id": "AUTO-DISCO-003",
+  "name": "Domain controller or remote host enumeration",
+  "description": "Detects mapping of the network from a compromised host (net view /domain, nltest /dclist, nltest /domain_trusts, Get-ADComputer, arp -a sweeps). Finding the domain controllers is the step between landing on a workstation and moving toward the assets worth encrypting or stealing. `wmic /node:` is deliberately NOT a term here: it is remote EXECUTION (AUTO-LAT-001), and labelling it discovery mis-describes the step for whoever reads the incident. Medium alone, meaningful in sequence: this plus account discovery plus a credential dump on one entity is the shape of a real intrusion.",
+  "severity": "medium",
+  "risk_points": 40,
+  "selection": {
+    "category": "process",
+    "command_line": {"contains_any": [
+      "net view /domain", "net view /all", "nltest /dclist", "nltest /domain_trusts",
+      "get-adcomputer", "get-addomaincontroller", "dsquery computer", "arp -a"
+    ]}
+  },
+  "mitre_attack": ["T1018", "T1482"],
+  "tags": ["discovery", "endpoint", "living-off-the-land"]
+}

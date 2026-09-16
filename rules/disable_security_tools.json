@@ -1,0 +1,20 @@
+// Disable or Modify Tools — covers MITRE ATT&CK T1685
+{
+  "id": "AUTO-DEFEV-004",
+  "name": "Endpoint security control disabled",
+  "description": "Detects an operator turning off the control that would have caught the next step: Defender real-time monitoring or exclusions (Set-MpPreference -DisableRealtimeMonitoring, Add-MpPreference -ExclusionPath), the Defender service (sc stop/config WinDefend), the firewall (netsh advfirewall set allprofiles state off), or Linux equivalents (systemctl stop auditd, setenforce 0). Adding an exclusion path is included deliberately: it is quieter than disabling the engine and achieves the same result for the directory the payload runs from.",
+  "severity": "high",
+  "risk_points": 70,
+  "selection": {
+    "category": "process",
+    "command_line": {"contains_any": [
+      "disablerealtimemonitoring", "disablebehaviormonitoring", "disableioavprotection",
+      "add-mppreference -exclusionpath", "set-mppreference -exclusion",
+      "sc stop windefend", "sc config windefend", "sc delete windefend",
+      "netsh advfirewall set allprofiles state off", "netsh firewall set opmode disable",
+      "systemctl stop auditd", "systemctl disable auditd", "setenforce 0", "service auditd stop"
+    ]}
+  },
+  "mitre_attack": ["T1685", "T1686"],
+  "tags": ["defense-impairment", "endpoint", "pre-payload"]
+}

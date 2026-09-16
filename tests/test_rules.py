@@ -123,6 +123,104 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
             {"category": "cloud", "action": "org.invite_member", "user": "alice", "cloud_account": "acme"},
         ],
     },
+    "AUTO-IMPACT-004": {
+        "fires": [
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "vssadmin delete shadows /all /quiet"},
+            {"category": "process", "process_name": "bcdedit.exe", "command_line": "bcdedit /set {default} recoveryenabled No"},
+            {"category": "process", "process_name": "wbadmin.exe", "command_line": "wbadmin delete catalog -quiet"},
+        ],
+        "silent": [
+            # Listing shadows is inventory, not destruction.
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "vssadmin list shadows"},
+            {"category": "process", "process_name": "bcdedit.exe", "command_line": "bcdedit /enum"},
+        ],
+    },
+    "AUTO-COLLECT-001": {
+        "fires": [
+            {"category": "process", "process_name": "rar.exe", "command_line": "rar a -hpSecret123 stage.rar C:\\Users\\alice\\Documents"},
+            {"category": "process", "process_name": "7z.exe", "command_line": "7z a -pInfected archive.7z C:\\finance"},
+        ],
+        "silent": [
+            # No password flag: routine compression, not staging.
+            {"category": "process", "process_name": "rar.exe", "command_line": "rar a backup.rar C:\\logs"},
+            {"category": "process", "process_name": "tar", "command_line": "tar czf logs.tgz /var/log"},
+        ],
+    },
+    "AUTO-C2-002": {
+        "fires": [
+            {"category": "process", "process_name": "AnyDesk.exe", "command_line": "AnyDesk.exe --silent"},
+            {"category": "process", "process_name": "ScreenConnect.ClientService.exe", "command_line": "ScreenConnect.ClientService.exe"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "mstsc.exe", "command_line": "mstsc.exe /v:finance-02"},
+            {"category": "process", "process_name": "ssh.exe", "command_line": "ssh alice@10.0.0.5"},
+        ],
+    },
+    "AUTO-DISCO-002": {
+        "fires": [
+            {"category": "process", "process_name": "net.exe", "command_line": "net group \"domain admins\" /domain"},
+            {"category": "process", "process_name": "powershell.exe", "command_line": "Get-ADUser -Filter * -Properties MemberOf"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "net.exe", "command_line": "net use Z: \\\\fileserver\\share"},
+            {"category": "process", "process_name": "whoami.exe", "command_line": "whoami"},
+            # A privilege GRANT is account manipulation (AUTO-PERSIST-002), not
+            # enumeration. Counting it twice inflates incident risk and claims
+            # enumeration happened when it did not.
+            {"category": "process", "process_name": "net.exe", "command_line": "net localgroup administrators svc_helpdesk /add"},
+        ],
+    },
+    "AUTO-DISCO-003": {
+        "fires": [
+            {"category": "process", "process_name": "nltest.exe", "command_line": "nltest /dclist:corp.local"},
+            {"category": "process", "process_name": "net.exe", "command_line": "net view /domain"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "net.exe", "command_line": "net start"},
+            {"category": "process", "process_name": "ping.exe", "command_line": "ping dc-01"},
+        ],
+    },
+    "AUTO-PERSIST-001": {
+        "fires": [
+            {"category": "process", "process_name": "schtasks.exe", "command_line": "schtasks /create /tn Updater /tr C:\\temp\\p.exe /sc minute"},
+            {"category": "process", "process_name": "crontab", "command_line": "crontab -e"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "schtasks.exe", "command_line": "schtasks /query /fo LIST"},
+            {"category": "process", "process_name": "crontab", "command_line": "crontab -l"},
+        ],
+    },
+    "AUTO-DEFEV-004": {
+        "fires": [
+            {"category": "process", "process_name": "powershell.exe", "command_line": "Set-MpPreference -DisableRealtimeMonitoring $true"},
+            {"category": "process", "process_name": "powershell.exe", "command_line": "Add-MpPreference -ExclusionPath C:\\Users\\Public"},
+            {"category": "process", "process_name": "netsh.exe", "command_line": "netsh advfirewall set allprofiles state off"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "powershell.exe", "command_line": "Get-MpPreference"},
+            {"category": "process", "process_name": "netsh.exe", "command_line": "netsh advfirewall show allprofiles"},
+        ],
+    },
+    "AUTO-PERSIST-002": {
+        "fires": [
+            {"category": "process", "process_name": "net.exe", "command_line": "net user /add svc_backup Passw0rd!"},
+            {"category": "process", "process_name": "net.exe", "command_line": "net localgroup administrators svc_backup /add"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "net.exe", "command_line": "net user alice"},
+            {"category": "process", "process_name": "net.exe", "command_line": "net localgroup administrators"},
+        ],
+    },
+    "AUTO-CRED-003": {
+        "fires": [
+            {"category": "process", "process_name": "ntdsutil.exe", "command_line": "ntdsutil \"ac i ntds\" ifm \"create full C:\\temp\" q q"},
+            {"category": "process", "process_name": "esentutl.exe", "command_line": "esentutl /y ntds.dit /d C:\\temp\\ntds.dit"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "ntdsutil.exe", "command_line": "help"},
+            {"category": "process", "process_name": "esentutl.exe", "command_line": "esentutl /mh C:\\temp\\mail.edb"},
+        ],
+    },
     "AUTO-EMAIL-001": {
         "fires": [
             {"category": "email", "action": "phishing_email_received", "user": "alice"},

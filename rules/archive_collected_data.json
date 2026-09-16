@@ -1,0 +1,33 @@
+// Archive Collected Data — covers MITRE ATT&CK T1560
+{
+  "id": "AUTO-COLLECT-001",
+  "name": "Data archived with a password before exfiltration",
+  "description": "Detects archive creation with a password or recursion flag typical of staging before exfiltration (rar a -hp, 7z a -p, WinRAR -m5 -v splitting). Password protection is the discriminator: routine backup scripts rarely encrypt an ad-hoc archive, while an operator staging stolen data almost always does, to defeat DLP inspection. Pair with AUTO-EXFIL-001; the archive step usually precedes the transfer by minutes. Kept as a flat selection deliberately: an any_of/contains_all tree does not survive the Sigma export round-trip, and a rule that cannot be exported cannot be shared.",
+  "severity": "high",
+  "risk_points": 65,
+  "selection": {
+    "category": "process",
+    "command_line": {
+      "contains_any": [
+        "a -hp",
+        "rar a -p",
+        "7z a -p",
+        "7z.exe a -p",
+        "7za a -p",
+        "-mhe=on",
+        "winrar.exe a -",
+        "makecab /f",
+        "compress-archive -path"
+      ]
+    }
+  },
+  "mitre_attack": [
+    "T1560"
+  ],
+  "tags": [
+    "collection",
+    "staging",
+    "exfiltration",
+    "endpoint"
+  ]
+}

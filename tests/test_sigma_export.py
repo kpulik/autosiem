@@ -189,7 +189,7 @@ def test_export_multi_operator_dict_as_exact_and() -> None:
 def test_round_trip_all_bundled_rules() -> None:
     rules_dir = Path(__file__).resolve().parents[1] / "rules"
     rules = load_rules(rules_dir)
-    assert len(rules) == 19
+    assert len(rules) == 28
     for rule in rules:
         assert_round_trips(rule)
 
