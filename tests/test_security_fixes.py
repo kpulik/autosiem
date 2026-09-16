@@ -1,5 +1,6 @@
 import json
 from starlette.testclient import TestClient
+from autosiem.rbac import hash_token
 from autosiem.web.api import app
 from autosiem.listeners import SyslogServer
 
@@ -19,7 +20,7 @@ def test_sec_002_ui_post_routes_require_permission_in_rbac_mode(monkeypatch, tmp
     """SEC-002: UI POST mutating routes enforce RBAC permissions when RBAC enabled."""
     users_file = tmp_path / "users.json"
     users_file.write_text(json.dumps({
-        "users": [{"name": "viewer_user", "role": "viewer", "token": "viewer-tok"}]
+        "users": [{"name": "viewer_user", "role": "viewer", "token_hash": hash_token("viewer-tok")}]
     }))
     monkeypatch.setenv("AUTOSIEM_RBAC_FILE", str(users_file))
     client = TestClient(app)

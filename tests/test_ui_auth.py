@@ -16,6 +16,7 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+from autosiem.rbac import hash_token  # noqa: E402
 from autosiem.web.api import UI_PAGES, _csrf_token, _is_readonly_ui_get, app  # noqa: E402
 
 TOGGLE_PATH = "/ui/rules/AUTO-AUTH-001/toggle"
@@ -23,7 +24,12 @@ TOGGLE_PATH = "/ui/rules/AUTO-AUTH-001/toggle"
 
 def _users_file(tmp_path, role: str = "admin", token: str = "tok") -> str:
     path = tmp_path / "users.json"
-    path.write_text(json.dumps({"users": [{"name": "u", "role": role, "tenant": "acme", "token": token}]}))
+    # A users file may not carry a plaintext token (SEC-008).
+    path.write_text(
+        json.dumps(
+            {"users": [{"name": "u", "role": role, "tenant": "acme", "token_hash": hash_token(token)}]}
+        )
+    )
     return str(path)
 
 
@@ -275,3 +281,37 @@ def test_the_type_system_is_driven_by_custom_properties() -> None:
     css = _page("t", "<p>body</p>")
     assert "--font-display:" in css and "--font-body:" in css
     assert "font-family: var(--font-body)" in css
+
+
+def test_an_unloadable_users_file_fails_closed_with_503(monkeypatch, tmp_path) -> None:
+    """A users file with a plaintext token must deny access, not 500.
+
+    The middleware loads the store on every guarded request, so a ValueError
+    from :meth:`Rbac.load` would otherwise surface as an opaque 500. It answers
+    503 instead: no route runs (fail closed), and the detail stays generic
+    because the underlying message names a filesystem path and the caller is
+    not authenticated.
+    """
+    users_file = tmp_path / "users.json"
+    users_file.write_text(
+        json.dumps({"users": [{"name": "bad", "role": "admin", "token": "plain-tok"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AUTOSIEM_RBAC_FILE", str(users_file))
+    monkeypatch.setenv("AUTOSIEM_DB", str(tmp_path / "misconfigured.db"))
+    client = TestClient(app)
+
+    api = client.get("/api/rules")
+    assert api.status_code == 503
+    detail = api.json()["detail"]
+    assert "invalid" in detail
+    # The server path must not leak to an unauthenticated caller.
+    assert str(users_file) not in detail
+    assert "plain-tok" not in detail
+
+    page = client.get("/audit")
+    assert page.status_code == 503
+    assert str(users_file) not in page.text
+
+    # /health stays open — it is exempt from the guard by design.
+    assert client.get("/health").status_code == 200

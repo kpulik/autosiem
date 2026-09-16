@@ -5,6 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
+from autosiem.rbac import hash_token
 from autosiem.web.api import app
 
 
@@ -105,8 +106,21 @@ def test_api_auth_guard_blocks_when_token_configured(monkeypatch, tmp_path) -> N
 
 
 def _write_users_file(tmp_path, users: list[dict]) -> str:
+    """Write a users file, hashing each fixture's readable ``token``.
+
+    A users file may not carry a plaintext token (SEC-008), but the tests read
+    better when the fixture names the token it is about to send, so the hashing
+    happens here rather than in every caller.
+    """
     path = tmp_path / "users.json"
-    path.write_text(json.dumps({"users": users}))
+    records = []
+    for user in users:
+        record = dict(user)
+        token = record.pop("token", None)
+        if token is not None:
+            record["token_hash"] = hash_token(token)
+        records.append(record)
+    path.write_text(json.dumps({"users": records}))
     return str(path)
 
 

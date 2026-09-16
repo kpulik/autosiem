@@ -383,8 +383,8 @@ written.**
 | SEC-002 | **High** | ✅ **Resolved** | `ca0ffcc` — `/ui/*` state-changing routes require permission **and** a stateless CSRF token (`_validate_csrf` in `web/api.py`) |
 | SEC-003 | **High** | ✅ **Resolved** | `ca0ffcc` — `AUTOSIEM_MAX_INGEST_BYTES` (10 MB default) + `AUTOSIEM_MAX_INGEST_EVENTS` (10,000 default) reject oversized posts before the pipeline runs |
 | SEC-004 | **High** | ✅ **Resolved** | `ca0ffcc` — UDP listener takes a source-IP allowlist (`allowed_hosts`) and dispatches through a bounded `ThreadPoolExecutor` |
-| SEC-006 | Medium | ⚠️ **Partial** | `secrets.compare_digest` is now used in `web/api.py` (CSRF validation, legacy `AUTOSIEM_API_TOKEN` guard). **Still open:** `rbac.py:authenticate` compares the stored digest with `==` |
-| SEC-008 | Medium | ⚠️ **Partial** | `400b73e` — `rotate_token()` / `revoke_token()` shipped (CLI `users rotate\|revoke`, `POST /api/users/{name}/rotate-token\|revoke-token`). **Still open:** tokens are still unsalted sha256 (no KDF), and `Rbac.load()` still accepts a plaintext `token` field |
+| SEC-006 | Medium | ✅ **Resolved** | 2026-09-16 — `rbac.verify_token` routes every comparison through `secrets.compare_digest`, for both the PBKDF2 and the legacy digest paths, and `Rbac.authenticate` now calls it instead of `==`. Asserted on the call in `test_rbac.py::test_authenticate_uses_constant_time_comparison`, since timing itself cannot be asserted |
+| SEC-008 | Medium | ✅ **Resolved** | `400b73e` shipped `rotate_token()` / `revoke_token()`. 2026-09-16 completed it: `hash_token` is salted PBKDF2-HMAC-SHA256 (`pbkdf2_sha256$<iters>$<salt>$<digest>`, written as `token_hash`), and `Rbac.load()` **refuses** a plaintext `token` field by name. Legacy `token_sha256` digests still verify so existing files keep working; `users rotate` rewrites them salted |
 | SEC-013 | Medium | ✅ **Resolved** | `400b73e` (data plane) + `f0bc677` (control plane) — see below |
 
 ### SEC-013 in detail — tenancy is now enforced
@@ -412,14 +412,66 @@ single-tenant deployments are unaffected by either change.
 
 ### Highest-value remaining work
 
-1. **SEC-006 (finish it)** — swap the `==` digest comparison in `rbac.py:authenticate` for
-   `secrets.compare_digest`; it is the one remaining timing-sensitive compare.
-2. **SEC-008 (finish it)** — move `hash_token` to a salted KDF (`hashlib.pbkdf2_hmac`) and
-   make `Rbac.load()` reject a plaintext `token` field instead of hashing it on the fly.
-3. **SEC-005** — HMAC the audit chain with a key held outside the DB (`AUTOSIEM_AUDIT_SECRET`)
-   so the chain is tamper-*proof*, not just tamper-*evident*.
-4. **SEC-009 / SEC-007 / SEC-012** — actor-from-principal only, fail-closed ingest token, and
+~~1. SEC-006 (finish it)~~ and ~~2. SEC-008 (finish it)~~ — **both closed 2026-09-16**; see
+the resolution table above and "SEC-006 / SEC-008 in detail" below.
+
+1. **SEC-005** — HMAC the audit chain with a key held outside the DB (`AUTOSIEM_AUDIT_SECRET`)
+   so the chain is tamper-*proof*, not just tamper-*evident*. Now the largest open finding.
+2. **SEC-009 / SEC-007 / SEC-012** — actor-from-principal only, fail-closed ingest token, and
    a documented TLS reverse-proxy requirement remain as originally written.
+3. **SEC-017 (the unfixed half)** — feed signing/pinning and an SSRF allow-list; the HTTPS
+   transport rule is done.
+
+### SEC-006 / SEC-008 in detail — token storage (fixed 2026-09-16)
+
+**Severity:** Medium (both). **Status:** Fixed.
+
+`hash_token` now returns a salted PBKDF2-HMAC-SHA256 verifier,
+`pbkdf2_sha256$<iterations>$<salt_hex>$<digest_hex>`, with a fresh 16-byte salt
+per call and 100,000 iterations. `Rbac.save()` writes it under `token_hash`;
+`Rbac.load()` reads `token_hash`, still accepts the legacy `token_sha256` key,
+and **refuses a plaintext `token` field by name**. The new
+`rbac.verify_token(token, stored)` is the only comparison path and routes both
+the PBKDF2 and legacy branches through `secrets.compare_digest`.
+
+**On the iteration count.** These are 256-bit random tokens
+(`secrets.token_urlsafe(32)`), not passwords. Key stretching buys little
+against a secret with no brute-force surface; the **per-user salt** is what
+actually closes SEC-008, because it defeats precomputation and stops two users
+who share a token from sharing a stored digest. 100,000 iterations is a
+conventional floor that measured ~15ms per verify on the development machine.
+
+**Accepted cost.** Per-user salts make a token un-lookupable by digest, so
+`authenticate()` verifies against each stored user in turn: a *failed*
+authentication now costs one PBKDF2 pass per user (~15ms x N). The verifier
+snapshot is taken under the store lock but the PBKDF2 passes run outside it, so
+one slow authentication does not serialize every other request. For a
+realistic store (<20 users) the worst case is ~300ms on a failed auth. If a
+deployment ever carries hundreds of users, lower `PBKDF2_ITERATIONS` rather
+than reintroducing an unsalted lookup index.
+
+**Legacy files.** A users file written before this change keeps authenticating
+— `verify_token` still accepts the bare sha256 hex form. Those digests stay
+unsalted until the token is rotated, so run `cli users rotate --name <user>`
+once per user to move a pre-existing deployment onto the salted format; the
+saved file then contains no `token_sha256` key at all.
+
+**Two defects found by running the CLI, not by the suite** (the recurring
+lesson on this project — the tests drove the library and never the command):
+
+- `cli users list` printed a raw Python traceback when the users file carried a
+  plaintext token. It now exits 1 with the one-line message, matching how a
+  missing PostgreSQL DSN is reported.
+- The API auth middleware loads the store on every guarded request, so the same
+  `ValueError` surfaced as an opaque 500. It now returns **503** and fails
+  closed (no route runs), with a generic detail — the underlying message names
+  a filesystem path and the caller is not authenticated.
+
+Regression tests: `test_rbac.py` (salting, legacy verification, malformed
+verifiers fail closed, constant-time compare, plaintext refusal, rotate
+upgrades a legacy digest), `test_cli.py` (no traceback, salted verifier on
+disk, two users sharing a token do not share a digest), `test_ui_auth.py`
+(503 fail-closed, no path leak).
 
 ## SEC-005 — Unauthenticated read access to the UI pages (fixed 2026-08-08)
 
