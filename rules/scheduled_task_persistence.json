@@ -1,0 +1,18 @@
+// Scheduled Task/Job — covers MITRE ATT&CK T1053
+{
+  "id": "AUTO-PERSIST-001",
+  "name": "Scheduled task or cron job created",
+  "description": "Detects new scheduled execution (schtasks /create, at, New-ScheduledTask, crontab -e, systemd-run --on). Scheduled tasks are how access survives a reboot, and how an operator runs payloads as SYSTEM without touching a service. Software installers create tasks constantly, so this is medium: what makes it a finding is the actor and the host, which correlation supplies. Tasks whose command line also matches an encoded-PowerShell or download rule are the ones to look at first.",
+  "severity": "medium",
+  "risk_points": 45,
+  "selection": {
+    "category": "process",
+    "command_line": {"contains_any": [
+      "schtasks /create", "schtasks.exe /create", "schtasks /ru system",
+      "new-scheduledtask", "register-scheduledtask", "crontab -e", "crontab -r",
+      "systemd-run --on", "at.exe "
+    ]}
+  },
+  "mitre_attack": ["T1053"],
+  "tags": ["persistence", "execution", "privilege-escalation", "endpoint"]
+}

@@ -1,0 +1,18 @@
+// Inhibit System Recovery — covers MITRE ATT&CK T1490
+{
+  "id": "AUTO-IMPACT-004",
+  "name": "System recovery destroyed before encryption",
+  "description": "Detects destruction of the backups a host would recover from: shadow copies (vssadmin/wmic shadowcopy delete), the backup catalogue (wbadmin delete), or Windows recovery (bcdedit /set recoveryenabled No, bootstatuspolicy ignoreallfailures). Nearly every ransomware crew does this minutes BEFORE encrypting, so this is the highest-value single indicator in the set: it fires while the files are still recoverable. Backup software does legitimately prune shadow copies, so allowlist the backup service account rather than lowering the severity.",
+  "severity": "critical",
+  "risk_points": 90,
+  "selection": {
+    "category": "process",
+    "command_line": {"contains_any": [
+      "vssadmin delete shadows", "vssadmin.exe delete shadows", "shadowcopy delete",
+      "wbadmin delete catalog", "wbadmin delete systemstatebackup", "wbadmin delete backup",
+      "recoveryenabled no", "bootstatuspolicy ignoreallfailures", "Remove-VMSnapshot"
+    ]}
+  },
+  "mitre_attack": ["T1490"],
+  "tags": ["impact", "ransomware", "endpoint", "pre-encryption"]
+}

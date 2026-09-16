@@ -1,0 +1,24 @@
+// Create Account — covers MITRE ATT&CK T1136
+{
+  "id": "AUTO-PERSIST-002",
+  "name": "Local or domain account created or privileged",
+  "description": "Detects account creation and privilege grants from the command line (net user /add, net localgroup administrators /add, New-LocalUser, useradd, usermod -aG sudo/wheel). An operator who creates their own account keeps access after the stolen credential is rotated, which is why this outlives incident response. Provisioning tooling does this legitimately, so allowlist the provisioning service account; a human account creating another account on a workstation is the case worth reading. Expressed as one regex rather than an any_of tree: `net localgroup administrators <user> /add` puts the account name in the middle, and a nested tree does not survive the Sigma export round-trip.",
+  "severity": "high",
+  "risk_points": 60,
+  "selection": {
+    "category": "process",
+    "command_line": {
+      "regex": "(net\\s+(user|localgroup|group)\\b.*/add)|new-localuser|add-localgroupmember|useradd\\s|usermod\\s+-ag\\s+(sudo|wheel)"
+    }
+  },
+  "mitre_attack": [
+    "T1136",
+    "T1098"
+  ],
+  "tags": [
+    "persistence",
+    "privilege-escalation",
+    "identity",
+    "endpoint"
+  ]
+}

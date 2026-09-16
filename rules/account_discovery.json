@@ -1,0 +1,39 @@
+// Account Discovery — covers MITRE ATT&CK T1087
+{
+  "id": "AUTO-DISCO-002",
+  "name": "Domain account or group enumeration",
+  "description": "Detects enumeration of accounts and privileged groups (net user /domain, net group \"Domain Admins\", Get-ADUser/Get-ADGroupMember, dsquery user). This is what an operator runs in the first minutes after landing, to find which accounts are worth stealing. A command that also GRANTS or REMOVES membership is excluded: that is account manipulation, covered by AUTO-PERSIST-002, and counting it twice both inflates the incident risk and tells the analyst enumeration happened when it did not. Administrators run the read-only forms too, which is why it is medium on its own: it earns its severity by correlating with the credential-access and lateral-movement findings that follow it within the same incident window.",
+  "severity": "medium",
+  "risk_points": 40,
+  "selection": {
+    "category": "process",
+    "command_line": {
+      "contains_any": [
+        "net user /domain",
+        "net user /dom",
+        "net group \"domain admins\"",
+        "net group /domain",
+        "net localgroup administrators",
+        "get-aduser",
+        "get-adgroupmember",
+        "get-localgroup",
+        "dsquery user",
+        "dsquery group",
+        "wmic useraccount"
+      ],
+      "not_contains_any": [
+        "/add",
+        "/delete",
+        "/del "
+      ]
+    }
+  },
+  "mitre_attack": [
+    "T1087"
+  ],
+  "tags": [
+    "discovery",
+    "endpoint",
+    "living-off-the-land"
+  ]
+}

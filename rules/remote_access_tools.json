@@ -1,0 +1,17 @@
+// Remote Access Tools — covers MITRE ATT&CK T1219
+{
+  "id": "AUTO-C2-002",
+  "name": "Commodity remote-access tool launched",
+  "description": "Detects the remote-support tools intrusion crews install for hands-on-keyboard access because they are signed, allowlisted, and blend into helpdesk traffic (AnyDesk, TeamViewer, ScreenConnect/ConnectWise, Atera, Splashtop, RustDesk, TightVNC). This is medium, not high, precisely because many of these ARE the organisation's real support tool: the finding is meaningful when the tool is not the sanctioned one, or appears on a host that never runs it. The peer_rare and novel_host UEBA signals do that comparison; allowlist the sanctioned vendor here.",
+  "severity": "medium",
+  "risk_points": 50,
+  "selection": {
+    "category": "process",
+    "process_name": {"contains_any": [
+      "anydesk", "teamviewer", "screenconnect", "connectwise", "atera",
+      "splashtop", "rustdesk", "tvnserver", "ammyy", "supremo"
+    ]}
+  },
+  "mitre_attack": ["T1219"],
+  "tags": ["command-and-control", "remote-access", "endpoint", "living-off-the-land"]
+}
