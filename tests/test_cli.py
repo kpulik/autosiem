@@ -148,7 +148,8 @@ def test_users_add_lists_roles_and_removes(capsys, monkeypatch, tmp_path) -> Non
     assert payload["token_hashed"] is True
     raw = users_file.read_text(encoding="utf-8")
     assert "tok-123" not in raw
-    assert "token_sha256" in raw
+    assert "token_hash" in raw
+    assert "pbkdf2_sha256$" in raw
 
     # List shows the user and reports RBAC as enabled.
     out = _run_cli(capsys, monkeypatch, "users", "list", "--file", str(users_file))
@@ -235,3 +236,38 @@ def test_every_identity_flag_changes_the_cursor_file() -> None:
         fields = {**base_fields, field: "different"}
         changed = _connector_config(_poll_args("github-api", **fields))["state_path"]
         assert changed != base, f"{field} does not affect the cursor filename"
+
+
+def test_users_rejects_a_plaintext_users_file_without_a_traceback(capsys, monkeypatch, tmp_path) -> None:
+    """A users file carrying a plaintext token is operator configuration.
+
+    The library raises ValueError (SEC-008); the CLI must turn that into a
+    one-line message and exit 1, not print a Python traceback. Every earlier
+    CLI defect on this project was found exactly here — the tests drove the
+    library and never the command.
+    """
+    users_file = tmp_path / "users.json"
+    users_file.write_text(
+        json.dumps({"users": [{"name": "bad", "role": "admin", "token": "plain-tok"}]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "users", "list", "--file", str(users_file))
+    message = str(excinfo.value)
+    assert "Traceback" not in message
+    assert "plaintext" in message and "bad" in message
+    assert "token_hash" in message
+
+
+def test_users_add_writes_a_salted_verifier(capsys, monkeypatch, tmp_path) -> None:
+    """`users add` must persist a salted PBKDF2 verifier, never a bare digest."""
+    users_file = tmp_path / "users.json"
+    _run_cli(capsys, monkeypatch, "users", "add", "--file", str(users_file), "--name", "bo", "--token", "bo-tok")
+    raw = users_file.read_text(encoding="utf-8")
+    assert "bo-tok" not in raw
+    assert "pbkdf2_sha256$" in raw
+    assert "token_sha256" not in raw
+    # A second user with the SAME token must not share a stored verifier.
+    _run_cli(capsys, monkeypatch, "users", "add", "--file", str(users_file), "--name", "cy", "--token", "bo-tok")
+    stored = [u["token_hash"] for u in json.loads(users_file.read_text(encoding="utf-8"))["users"]]
+    assert len(stored) == 2 and stored[0] != stored[1]

@@ -10,7 +10,8 @@ when a users file is configured (``AUTOSIEM_RBAC_FILE``) and contains at least
 one user, every ``/api/*`` request must authenticate to a user and each action
 is permission-checked; otherwise the legacy single-token
 ``AUTOSIEM_API_TOKEN`` guard applies unchanged. Tokens are only ever stored
-as sha256 digests (``token_sha256`` in the users file).
+as salted PBKDF2-HMAC-SHA256 verifiers (``token_hash`` in the users file);
+plaintext tokens are never stored and are refused on load (SEC-008).
 """
 
 from __future__ import annotations
@@ -94,9 +95,68 @@ def has_role_permission(role: str, permission: str) -> bool:
     return permission in role_permissions(role)
 
 
-def hash_token(token: str) -> str:
-    """Return the sha256 hex digest of a token (never store plaintext tokens)."""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+def _is_sha256_hex(value: str) -> bool:
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value.lower())
+
+
+# --- Token hashing (SEC-008) ----------------------------------------------
+# API tokens are 256-bit random strings (``secrets.token_urlsafe(32)``), not
+# passwords, so key stretching buys little: there is no brute-force surface on
+# a secret with that much entropy. The per-user *salt* is the part that matters
+# — it defeats precomputation and stops two users with the same token sharing a
+# digest. 100k iterations is a conventional floor that costs ~15ms per verify.
+#
+# Cost note: because each user has their own salt, a token cannot be looked up
+# by digest. :meth:`Rbac.authenticate` therefore verifies against each stored
+# user in turn, so a *failed* authentication costs one PBKDF2 pass per user.
+PBKDF2_ITERATIONS = 100_000
+PBKDF2_ALGORITHM = "pbkdf2_sha256"
+_SALT_BYTES = 16
+
+
+def hash_token(
+    token: str, *, salt: bytes | None = None, iterations: int = PBKDF2_ITERATIONS
+) -> str:
+    """Return a salted PBKDF2 verifier for *token* (never store plaintext).
+
+    The format is ``pbkdf2_sha256$<iterations>$<salt_hex>$<digest_hex>``. A
+    fresh random salt is generated unless one is supplied, so calling this
+    twice with the same token returns two different strings — compare with
+    :func:`verify_token`, never with ``==``.
+    """
+    if salt is None:
+        salt = secrets.token_bytes(_SALT_BYTES)
+    digest = hashlib.pbkdf2_hmac("sha256", token.encode("utf-8"), salt, iterations)
+    return f"{PBKDF2_ALGORITHM}${iterations}${salt.hex()}${digest.hex()}"
+
+
+def verify_token(token: str, stored: str) -> bool:
+    """Constant-time check of *token* against a *stored* verifier (SEC-006).
+
+    Accepts both the current ``pbkdf2_sha256$...`` format and the legacy bare
+    sha256 hex digest, so users files written before SEC-008 keep working until
+    their tokens are rotated. Returns ``False`` for anything unparseable rather
+    than raising, so one malformed record cannot break authentication for
+    everyone else.
+    """
+    if not token or not stored:
+        return False
+    if _is_sha256_hex(stored):  # legacy, unsalted — upgraded by ``users rotate``
+        legacy = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        return secrets.compare_digest(legacy, stored)
+    parts = stored.split("$")
+    if len(parts) != 4 or parts[0] != PBKDF2_ALGORITHM:
+        return False
+    _, raw_iterations, salt_hex, digest_hex = parts
+    try:
+        iterations = int(raw_iterations)
+        salt = bytes.fromhex(salt_hex)
+    except ValueError:
+        return False
+    if iterations < 1 or not salt:
+        return False
+    candidate = hashlib.pbkdf2_hmac("sha256", token.encode("utf-8"), salt, iterations)
+    return secrets.compare_digest(candidate.hex(), digest_hex)
 
 
 class PermissionDenied(Exception):
@@ -127,19 +187,19 @@ class User:
         return permission in self.effective_permissions
 
 
-def _is_sha256_hex(value: str) -> bool:
-    return len(value) == 64 and all(c in "0123456789abcdef" for c in value.lower())
-
-
 class Rbac:
     """Role store: users + token hashes + optional JSON persistence.
 
     The users file format::
 
-        {"users": [{"name": "alice", "role": "analyst", "tenant": "acme", "token": "..."}]}
+        {"users": [{"name": "alice", "role": "analyst", "tenant": "acme",
+                    "token_hash": "pbkdf2_sha256$100000$<salt>$<digest>"}]}
 
-    Either ``token`` (plaintext; hashed on load) or ``token_sha256`` is
-    accepted. :meth:`save` always writes only ``token_sha256``.
+    :meth:`save` always writes ``token_hash``. :meth:`load` also accepts the
+    legacy ``token_sha256`` key so files written before SEC-008 keep working;
+    ``users rotate`` re-writes those in the salted format. A plaintext
+    ``token`` key is **refused** — use ``users add``/``users rotate``, which
+    generate a token and print it once.
     """
 
     def __init__(
@@ -176,9 +236,15 @@ class Rbac:
                     permissions=frozenset(raw_permissions) if raw_permissions else None,
                 )
             )
-            token = item.get("token_sha256") or item.get("token")
-            if token:
-                token_hashes[name] = token if _is_sha256_hex(token) else hash_token(token)
+            if item.get("token"):
+                raise ValueError(
+                    f"user '{name}' has a plaintext 'token' field in {file_path}; "
+                    "store only 'token_hash' (issue tokens with `cli users add` "
+                    "or `cli users rotate`)"
+                )
+            stored = item.get("token_hash") or item.get("token_sha256")
+            if stored:
+                token_hashes[name] = str(stored)
         return cls(users=users, token_hashes=token_hashes, path=file_path)
 
     def is_enabled(self) -> bool:
@@ -187,14 +253,19 @@ class Rbac:
 
     # -- authentication ----------------------------------------------------
     def authenticate(self, token: str | None) -> User | None:
-        """Resolve a bearer token to a user, or None when it matches no one."""
+        """Resolve a bearer token to a user, or None when it matches no one.
+
+        The verifier snapshot is taken under the lock but the PBKDF2 passes run
+        outside it, so one slow authentication does not serialize every other
+        request.
+        """
         if not token:
             return None
-        digest = hash_token(token)
         with self._lock:
-            for name, stored in self._token_hashes.items():
-                if stored == digest:
-                    return self._users.get(name)
+            candidates = list(self._token_hashes.items())
+        for name, stored in candidates:
+            if verify_token(token, stored):
+                return self._users.get(name)
         return None
 
     def user(self, name: str) -> User | None:
@@ -288,7 +359,7 @@ class Rbac:
                         "name": user.name,
                         "role": user.role,
                         "tenant": user.tenant,
-                        "token_sha256": self._token_hashes.get(user.name),
+                        "token_hash": self._token_hashes.get(user.name),
                     }
                     for user in sorted(self._users.values(), key=lambda u: u.name)
                 ]

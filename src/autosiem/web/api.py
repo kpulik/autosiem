@@ -221,7 +221,13 @@ async def _api_auth_middleware(request: Request, call_next: Any) -> Any:
     if not _is_guarded_path(path, method):
         return await call_next(request)
 
-    rbac = rbac_from_env()
+    try:
+        rbac = rbac_from_env()
+    except ValueError:
+        # An unreadable users file must deny access, but the caller is not the
+        # problem and the message names a server path, so answer with a
+        # generic 503 rather than a 401 or a leaked traceback.
+        return _misconfigured(request)
     request.state.rbac = rbac
     token = _bearer_token(request)
 
@@ -261,6 +267,22 @@ def _unauthorized(request: Request, detail: str) -> Any:
             status_code=401,
         )
     return JSONResponse(status_code=401, content={"detail": detail})
+
+
+def _misconfigured(request: Request) -> Any:
+    """503 when the users file cannot be loaded (e.g. a plaintext token).
+
+    Fails closed: no route runs. The detail stays generic because the
+    underlying message names a filesystem path and the caller is not
+    authenticated.
+    """
+    detail = "server auth configuration is invalid; see the AutoSIEM logs"
+    if _is_readonly_ui_get(request.url.path, request.method):
+        return HTMLResponse(
+            f"<h1>503 Service Unavailable</h1><p>{html.escape(detail)}</p>",
+            status_code=503,
+        )
+    return JSONResponse(status_code=503, content={"detail": detail})
 
 
 @app.get("/health")

@@ -20,6 +20,7 @@ from autosiem.rbac import (
     User,
     hash_token,
     rbac_from_env,
+    verify_token,
     role_permissions,
 )
 
@@ -52,11 +53,90 @@ def test_user_permission_override() -> None:
     assert not limited.has(PERM_ADMIN)
 
 
-def test_hash_token_is_deterministic_sha256() -> None:
-    assert len(hash_token("sekret")) == 64
-    assert hash_token("sekret") == hash_token("sekret")
-    assert hash_token("sekret") != hash_token("sekret2")
-    assert all(c in "0123456789abcdef" for c in hash_token("sekret"))
+def test_hash_token_is_salted_pbkdf2() -> None:
+    a = "sekret"
+    # SEC-008: the same token hashes to a different string every time, because
+    # each call draws a fresh salt. Two users sharing a token cannot be spotted
+    # by comparing their stored verifiers.
+    first = hash_token(a)
+    second = hash_token(a)
+    assert first != second
+    assert first.startswith("pbkdf2_sha256$100000$")
+    assert len(first.split("$")) == 4
+    assert a not in first
+    # Both still verify, and a different token does not.
+    assert verify_token(a, first)
+    assert verify_token(a, second)
+    assert not verify_token("sekret2", first)
+
+
+def test_hash_token_honours_explicit_salt_and_iterations() -> None:
+    salt = b"\x01" * 16
+    stored = hash_token("tok", salt=salt, iterations=1000)
+    assert stored == hash_token("tok", salt=salt, iterations=1000)
+    assert stored.startswith("pbkdf2_sha256$1000$" + salt.hex() + "$")
+    assert verify_token("tok", stored)
+
+
+def test_verify_token_accepts_legacy_sha256_digests() -> None:
+    # Users files written before SEC-008 must keep authenticating until their
+    # tokens are rotated, so the bare sha256 hex form still verifies.
+    import hashlib
+
+    legacy = hashlib.sha256(b"old-tok").hexdigest()
+    assert verify_token("old-tok", legacy)
+    assert not verify_token("other-tok", legacy)
+    rbac = Rbac(users=[User(name="old", role=ROLE_VIEWER)], token_hashes={"old": legacy})
+    assert rbac.authenticate("old-tok") is not None
+    assert rbac.authenticate("other-tok") is None
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        "",
+        "not-a-hash",
+        "pbkdf2_sha256$100000$deadbeef",  # too few fields
+        "pbkdf2_sha512$100000$aa$bb",  # unknown algorithm
+        "pbkdf2_sha256$notanint$aa$bb",
+        "pbkdf2_sha256$0$aa$bb",  # non-positive iterations
+        "pbkdf2_sha256$1000$nothex$bb",
+    ],
+)
+def test_verify_token_refuses_malformed_verifiers(stored: str) -> None:
+    # A malformed record must fail closed rather than raise: one broken row
+    # cannot be allowed to break authentication for every other user.
+    assert verify_token("tok", stored) is False
+
+
+def test_verify_token_refuses_empty_token() -> None:
+    assert verify_token("", hash_token("tok")) is False
+
+
+def test_authenticate_uses_constant_time_comparison() -> None:
+    # SEC-006: the digest comparison must go through secrets.compare_digest,
+    # never ``==``. Assert on the call, since timing cannot be asserted.
+    import secrets as secrets_module
+
+    calls: list[tuple[str, str]] = []
+    real = secrets_module.compare_digest
+
+    def spy(a, b):  # type: ignore[no-untyped-def]
+        calls.append((a, b))
+        return real(a, b)
+
+    rbac = Rbac(users=[User(name="a", role=ROLE_VIEWER)], token_hashes={"a": hash_token("tok")})
+    import autosiem.rbac as rbac_module
+
+    original = rbac_module.secrets.compare_digest
+    rbac_module.secrets.compare_digest = spy  # type: ignore[assignment]
+    try:
+        assert rbac.authenticate("tok") is not None
+        assert rbac.authenticate("wrong") is None
+    finally:
+        rbac_module.secrets.compare_digest = original  # type: ignore[assignment]
+    assert len(calls) == 2
+    assert all("tok" not in a and "tok" not in b for a, b in calls)
 
 
 def test_authenticate_matches_plaintext_token() -> None:
@@ -95,14 +175,17 @@ def test_add_remove_and_duplicate_guard() -> None:
     assert not rbac.is_enabled()
 
 
-def test_load_accepts_plaintext_and_hashed_tokens(tmp_path) -> None:
+def test_load_reads_token_hash_and_legacy_key(tmp_path) -> None:
+    import hashlib
+
     path = tmp_path / "users.json"
     path.write_text(
         json.dumps(
             {
                 "users": [
-                    {"name": "admin", "role": "admin", "tenant": "acme", "token": "admin-tok"},
-                    {"name": "svc", "role": "ingest", "tenant": "acme", "token_sha256": hash_token("svc-tok")},
+                    {"name": "admin", "role": "admin", "tenant": "acme", "token_hash": hash_token("admin-tok")},
+                    # Legacy key, written before SEC-008.
+                    {"name": "svc", "role": "ingest", "tenant": "acme", "token_sha256": hashlib.sha256(b"svc-tok").hexdigest()},
                 ]
             }
         )
@@ -113,6 +196,40 @@ def test_load_accepts_plaintext_and_hashed_tokens(tmp_path) -> None:
     assert rbac.authenticate("svc-tok") is not None
     assert rbac.authenticate("nope") is None
     assert len(rbac.list_users()) == 2
+
+
+def test_load_refuses_a_plaintext_token_field(tmp_path) -> None:
+    # SEC-008: hashing a plaintext token on load quietly blessed users files
+    # that carried live credentials on disk. Refuse them by name instead.
+    path = tmp_path / "users.json"
+    path.write_text(
+        json.dumps({"users": [{"name": "admin", "role": "admin", "token": "admin-tok"}]})
+    )
+    with pytest.raises(ValueError) as excinfo:
+        Rbac.load(path)
+    message = str(excinfo.value)
+    assert "plaintext" in message and "admin" in message
+    assert "users add" in message or "users rotate" in message
+
+
+def test_rotate_token_upgrades_a_legacy_digest(tmp_path) -> None:
+    import hashlib
+
+    path = tmp_path / "users.json"
+    path.write_text(
+        json.dumps(
+            {"users": [{"name": "old", "role": "viewer", "token_sha256": hashlib.sha256(b"old-tok").hexdigest()}]}
+        )
+    )
+    rbac = Rbac.load(path)
+    assert rbac.authenticate("old-tok") is not None
+    fresh = rbac.rotate_token("old")
+    rbac.save(path)
+    assert rbac.authenticate("old-tok") is None
+    assert rbac.authenticate(fresh) is not None
+    raw = path.read_text(encoding="utf-8")
+    assert "pbkdf2_sha256$" in raw
+    assert "token_sha256" not in raw
 
 
 def test_load_missing_file_is_disabled(tmp_path) -> None:
@@ -129,7 +246,8 @@ def test_save_roundtrip_never_writes_plaintext(tmp_path) -> None:
     rbac.save(path)
     raw = path.read_text(encoding="utf-8")
     assert "erin-sekret" not in raw
-    assert "token_sha256" in raw
+    assert "token_hash" in raw
+    assert "pbkdf2_sha256$" in raw
     reloaded = Rbac.load(path)
     user = reloaded.authenticate("erin-sekret")
     assert user is not None and user.role == ROLE_ANALYST and user.tenant == "beta"
@@ -139,7 +257,9 @@ def test_rbac_from_env(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("AUTOSIEM_RBAC_FILE", raising=False)
     assert not rbac_from_env().is_enabled()
     users_file = tmp_path / "users.json"
-    users_file.write_text(json.dumps({"users": [{"name": "a", "role": "viewer", "token": "t"}]}))
+    users_file.write_text(
+        json.dumps({"users": [{"name": "a", "role": "viewer", "token_hash": hash_token("t")}]})
+    )
     monkeypatch.setenv("AUTOSIEM_RBAC_FILE", str(users_file))
     assert rbac_from_env().is_enabled()
     monkeypatch.setenv("AUTOSIEM_RBAC_FILE", str(tmp_path / "absent.json"))

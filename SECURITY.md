@@ -28,7 +28,11 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
 1. **Authentication & RBAC (`src/autosiem/rbac.py`)**
    - Fine-grained role permissions (`admin`, `analyst`, `ingest`, `viewer`).
    - Default-closed middleware covering `/api/*`, `/ui/*` and every rendered UI page. Only `/health`, `/metrics` and the generated API docs stay open. `AUTOSIEM_AUTH_INSECURE=1` reopens everything for local development.
-   - Secure token hashing (`sha256`); tokens are never stored or written in plaintext.
+   - Token hashing is salted **PBKDF2-HMAC-SHA256** (`token_hash`, 100k iterations, per-user salt);
+     tokens are never stored or written in plaintext, and a users file carrying a plaintext
+     `token` field is **refused on load** (SEC-008). Every comparison goes through
+     `secrets.compare_digest` (SEC-006). Legacy unsalted `token_sha256` digests still verify;
+     `users rotate` rewrites them in the salted format.
    - Token rotation and revocation (`users rotate|revoke`, `POST /api/users/{name}/rotate-token|revoke-token`), gated on `users:manage`.
    - Tokens are accepted as `Authorization: Bearer`, `x-api-key`, or an `autosiem_token` cookie, so the browser UI is usable under RBAC.
 

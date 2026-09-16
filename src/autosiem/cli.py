@@ -526,7 +526,12 @@ def _run_distributed(args: argparse.Namespace) -> None:
 
 def _run_users(args: argparse.Namespace) -> None:
     """Manage the RBAC user store (list/add/remove/rotate/revoke) or describe role permissions."""
-    rbac = Rbac.load(args.file)
+    try:
+        rbac = Rbac.load(args.file)
+    except ValueError as exc:
+        # A users file carrying a plaintext token is operator configuration,
+        # not a crash. Report it the way a missing PostgreSQL DSN is reported.
+        raise SystemExit(str(exc)) from None
     if args.action == "roles":
         _print_json({"roles": {role: sorted(perms) for role, perms in ROLE_PERMISSIONS.items()}})
         return
