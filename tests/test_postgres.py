@@ -266,10 +266,14 @@ def test_pg_api_auth_approval_conflict_and_outbox_metrics(pg, pg_dsn, result, mo
     monkeypatch.setenv("AUTOSIEM_BACKEND", "opensearch")
     monkeypatch.setenv("AUTOSIEM_BACKEND_URL", "https://example.invalid")
     users = tmp_path / "users.json"
+    # A users file may not carry a plaintext token (SEC-008), so hash each one
+    # here; the fixture still names the token it is about to send.
+    from autosiem.rbac import hash_token
+
     users.write_text(json.dumps({"users": [
-        {"name": "analyst", "role": "analyst", "tenant": "a", "token": "local-test-analyst"},
-        {"name": "viewer", "role": "viewer", "tenant": "a", "token": "local-test-viewer"},
-        {"name": "other", "role": "analyst", "tenant": "b", "token": "local-test-other"},
+        {"name": "analyst", "role": "analyst", "tenant": "a", "token_hash": hash_token("local-test-analyst")},
+        {"name": "viewer", "role": "viewer", "tenant": "a", "token_hash": hash_token("local-test-viewer")},
+        {"name": "other", "role": "analyst", "tenant": "b", "token_hash": hash_token("local-test-other")},
     ]}))
     monkeypatch.setenv("AUTOSIEM_RBAC_FILE", str(users))
     pg.save_pipeline_result(result, "a")
