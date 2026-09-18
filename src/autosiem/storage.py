@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import logging
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from dataclasses import asdict, is_dataclass
@@ -29,6 +32,35 @@ DEFAULT_TENANT = "default"
 AI_ANALYST_ACTOR = "ai-analyst"
 
 INCIDENT_STATUSES = {"open", "investigating", "resolved", "closed"}
+
+# --- Audit sealing (SEC-005) -----------------------------------------------
+# The SHA-256 chain makes tampering *evident* but not *proof*: anyone with
+# write access to the database can edit a row and recompute every later hash.
+# When AUTOSIEM_AUDIT_SECRET is set, each new row also carries an HMAC of its
+# chain hash under that key. The key lives outside the database, so a rewrite
+# without it cannot produce valid MACs. Because each hash covers every row
+# before it, the first sealed row also protects the unsealed history under it.
+AUDIT_SECRET_ENV = "AUTOSIEM_AUDIT_SECRET"
+_unsealed_warning_issued = False
+
+
+def _audit_key() -> bytes | None:
+    """The audit sealing key, read at call time like the CSRF secret."""
+    value = os.environ.get(AUDIT_SECRET_ENV, "")
+    return value.encode("utf-8") if value else None
+
+
+def _audit_mac(key: bytes, digest: str) -> str:
+    return hmac.new(key, digest.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _warn_unsealed_once() -> None:
+    global _unsealed_warning_issued
+    if not _unsealed_warning_issued:
+        _unsealed_warning_issued = True
+        logging.getLogger(__name__).warning(
+            "%s is not set; audit rows are hash-chained but not sealed, so a database "
+            "writer can rewrite history undetected (SEC-005)", AUDIT_SECRET_ENV)
 
 
 class StorageConflict(ValueError):
@@ -572,7 +604,8 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
 
         Each row links to the previous row's SHA-256 hash (``prev_hash``), so
         tampering with any historical entry is detectable by
-        :meth:`verify_audit_chain`.
+        :meth:`verify_audit_chain`. With ``AUTOSIEM_AUDIT_SECRET`` set the row
+        is also sealed: ``mac`` is an HMAC-SHA256 of ``hash`` under that key.
 
         ``tenant_id`` scopes the row for :meth:`list_audit`. It is deliberately
         NOT part of the hashed payload: adding a field would recompute every
@@ -586,22 +619,36 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
         prev_hash = previous["hash"] if previous is not None and previous["hash"] else ""
         payload = f"{prev_hash}|{timestamp}|{actor}|{action}|{target or ''}|{_json(details)}"
         digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        key = _audit_key()
+        if key is None:
+            _warn_unsealed_once()
         conn.execute(
-            "insert into audit_log(timestamp,actor,action,target,details,prev_hash,hash,tenant_id) "
-            "values(?,?,?,?,?,?,?,?)",
+            "insert into audit_log(timestamp,actor,action,target,details,prev_hash,hash,mac,tenant_id) "
+            "values(?,?,?,?,?,?,?,?,?)",
             (timestamp, actor, action, target, _json(details), prev_hash, digest,
-             tenant_id or DEFAULT_TENANT),
+             _audit_mac(key, digest) if key else None, tenant_id or DEFAULT_TENANT),
         )
 
     def verify_audit_chain(self) -> list[dict[str, Any]]:
-        """Return tamper mismatches in the audit chain (empty = intact)."""
+        """Return tamper mismatches in the audit chain (empty = intact).
+
+        With ``AUTOSIEM_AUDIT_SECRET`` set, sealed rows are also checked:
+        ``mac_mismatch`` means a row was rewritten by someone without the key
+        (or the key changed), and ``unsigned_after_signed`` means a row after
+        the first sealed one carries no MAC, which is how a keyless rewrite
+        would try to pass as legacy history. Without the key the MACs cannot
+        be checked; :meth:`audit_seal_summary` says so.
+        """
+        key = _audit_key()
         with self.connect() as conn:
             rows = conn.execute("select * from audit_log order by audit_id asc").fetchall()
         mismatches: list[dict[str, Any]] = []
         previous_hash = ""
+        seen_sealed = False
         for row in rows:
             row_hash = row["hash"]
             row_prev = row["prev_hash"]
+            row_mac = row["mac"]
             if row_prev is not None and row_prev != previous_hash:
                 mismatches.append({"audit_id": row["audit_id"], "reason": "prev_hash_mismatch"})
             if row_hash:
@@ -610,7 +657,27 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 if digest != row_hash:
                     mismatches.append({"audit_id": row["audit_id"], "reason": "hash_mismatch"})
                 previous_hash = row_hash
+            if key is not None:
+                if row_mac:
+                    seen_sealed = True
+                    if not secrets.compare_digest(_audit_mac(key, row_hash or ""), row_mac):
+                        mismatches.append({"audit_id": row["audit_id"], "reason": "mac_mismatch"})
+                elif seen_sealed:
+                    mismatches.append({"audit_id": row["audit_id"], "reason": "unsigned_after_signed"})
         return mismatches
+
+    def audit_seal_summary(self) -> dict[str, Any]:
+        """How much of the audit log is sealed, and whether the MACs were checkable."""
+        with self.connect() as conn:
+            row = conn.execute(
+                "select count(*) as total, count(mac) as sealed from audit_log"
+            ).fetchone()
+        total, sealed = int(row["total"]), int(row["sealed"])
+        return {
+            "key_configured": _audit_key() is not None,
+            "sealed_entries": sealed,
+            "unsealed_entries": total - sealed,
+        }
 
     def set_rule_enabled(self, rule_id: str, enabled: bool, actor: str = DEFAULT_CREATED_BY, tenant_id: str | None = None) -> dict[str, Any]:
         """Persist an enable/disable override for a detection rule."""
@@ -859,7 +926,7 @@ class AutoSIEMStorage(RelationalStorage):
                     conn.execute(f"alter table incidents add column {column} {ddl}")
             # Migration: older databases lack the audit hash-chain columns.
             audit_columns = {row["name"] for row in conn.execute("pragma table_info(audit_log)")}
-            for column, ddl in (("hash", "text"), ("prev_hash", "text")):
+            for column, ddl in (("hash", "text"), ("prev_hash", "text"), ("mac", "text")):
                 if column not in audit_columns:
                     conn.execute(f"alter table audit_log add column {column} {ddl}")
             # Migration: per-tenant data isolation (RBAC depth). Existing rows

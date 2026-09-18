@@ -455,7 +455,17 @@ def main() -> None:
         print(prometheus_text(metric_registry), end="")
     elif args.command == "audit-verify":
         mismatches = store.verify_audit_chain()
-        _print_json({"intact": not mismatches, "entries": len(store.list_audit(limit=100000)), "mismatches": mismatches})
+        seal = store.audit_seal_summary()
+        _print_json({
+            "intact": not mismatches,
+            "entries": len(store.list_audit(limit=100000)),
+            "mismatches": mismatches,
+            # "intact" only covers the MACs when the key is present: without it
+            # a keyless rewrite of the whole chain would still read as intact.
+            "seals_checked": seal["key_configured"],
+            "sealed_entries": seal["sealed_entries"],
+            "unsealed_entries": seal["unsealed_entries"],
+        })
     elif args.command == "distributed":
         _run_distributed(args)
     elif args.command == "users":

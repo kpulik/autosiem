@@ -407,3 +407,46 @@ def test_pg_saving_a_result_audits_without_a_signature_mismatch(pg, result):
     actions = {row["action"] for row in pg.list_audit(tenant_id="tenant-a")}
     assert "pipeline_result_saved" in actions
     assert pg.list_audit(tenant_id="tenant-b") == []
+
+
+def test_pg_audit_seal_survives_an_owner_that_disables_the_trigger(pg, pg_dsn, monkeypatch):
+    # SEC-005 on PostgreSQL. The immutability trigger stops the application
+    # role, but the table owner can simply disable it, rewrite a row and
+    # recompute the SHA-256 chain. Only a key held outside the database
+    # catches that.
+    import hashlib
+
+    from autosiem.storage import AUDIT_SECRET_ENV
+
+    monkeypatch.setenv(AUDIT_SECRET_ENV, "pg-seal-key")
+    for i in range(3):
+        pg.set_rule_enabled(f"AUTO-RULE-{i}", enabled=bool(i % 2), actor="analyst")
+    assert pg.verify_audit_chain() == []
+    assert pg.audit_seal_summary() == {"key_configured": True, "sealed_entries": 3, "unsealed_entries": 0}
+
+    driver = postgres._driver()
+    # Pin UTF-8 as the product's own connection does: on a SQL_ASCII cluster
+    # psycopg otherwise returns text as bytes and this rebuild hashes b'...'.
+    with driver.connect(pg_dsn, autocommit=True, client_encoding="utf8") as conn:
+        conn.execute("set search_path = autosiem, pg_catalog")
+        conn.execute("alter table audit_log disable trigger audit_immutable")
+        rows = conn.execute("select audit_id from audit_log order by audit_id").fetchall()
+        first_id = rows[0][0]
+        conn.execute("update audit_log set actor = 'attacker' where audit_id = %s", (first_id,))
+        previous = ""
+        for audit_id, ts, actor, action, target, details in conn.execute(
+            "select audit_id, timestamp, actor, action, target, details from audit_log order by audit_id"
+        ).fetchall():
+            payload = f"{previous}|{ts}|{actor}|{action}|{target or ''}|{details}"
+            digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            conn.execute("update audit_log set prev_hash = %s, hash = %s where audit_id = %s",
+                         (previous, digest, audit_id))
+            previous = digest
+        conn.execute("alter table audit_log enable trigger audit_immutable")
+
+    mismatches = pg.verify_audit_chain()
+    assert {m["reason"] for m in mismatches} == {"mac_mismatch"}
+    assert len(mismatches) == 3
+    # Without the key the same rewrite passes, which is the finding.
+    monkeypatch.delenv(AUDIT_SECRET_ENV)
+    assert pg.verify_audit_chain() == []
