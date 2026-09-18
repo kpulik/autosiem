@@ -286,7 +286,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-002 | **High** | `/ui/*` mutators bypass auth and RBAC (no CSRF) | `api.py` L118, L618-711 | Populate `request.state` for all paths; guard/port `/ui/*` writes to API controllers; add CSRF |
 | SEC-003 | **High** | Unbounded, synchronous `/api/ingest` → DoS | `api.py:api_ingest` L346-366; `_parse_ingest_payload` L309-333 | Rate limits, `MAX_INGEST_BYTES`/`MAX_INGEST_EVENTS` (413), move work to a bounded pool |
 | SEC-004 | **High** | UDP syslog/CEF listener open, spoofable, unthrottled | `listeners.py:SyslogServer._serve` L210-220; `cli.py:_run_listener` L481-508 | Source allowlist + rate limit; bounded worker pool; prefer TLS/TCP/API ingest |
-| SEC-005 | Medium | Audit chain tamper-evident, not tamper-proof | `storage.py:audit` L552-567; `verify_audit_chain` L569-586 | HMAC the payload with a key outside the DB; external anchor later |
+| SEC-005 | Medium | ~~Audit chain tamper-evident, not tamper-proof~~ **sealed 2026-09-17** | `storage.py:audit`; `verify_audit_chain` | ~~HMAC with a key outside the DB~~ done; external anchor later (truncation) |
 | SEC-006 | Medium | Token comparisons use `==` (timing) | `rbac.py:authenticate` L194; `api.py` L130, L339-343 | `secrets.compare_digest` everywhere |
 | SEC-007 | Medium | Ingest token default-open; overlaps/combines with API token | `api.py:_ingest_authorized` L336-343 | Fail closed when no ingest auth; document both tokens; startup surface log |
 | SEC-008 | Medium | Users-file tokens: unsalted sha256, no rotation/expiry, `load()` accepts plaintext `token` | `rbac.py:hash_token` L96-98; `load` L157-181; `save` L253-271 | KDF + salt; `rotate-token`; reject plaintext `token` on load |
@@ -386,6 +386,7 @@ written.**
 | SEC-006 | Medium | ✅ **Resolved** | 2026-09-16 — `rbac.verify_token` routes every comparison through `secrets.compare_digest`, for both the PBKDF2 and the legacy digest paths, and `Rbac.authenticate` now calls it instead of `==`. Asserted on the call in `test_rbac.py::test_authenticate_uses_constant_time_comparison`, since timing itself cannot be asserted |
 | SEC-008 | Medium | ✅ **Resolved** | `400b73e` shipped `rotate_token()` / `revoke_token()`. 2026-09-16 completed it: `hash_token` is salted PBKDF2-HMAC-SHA256 (`pbkdf2_sha256$<iters>$<salt>$<digest>`, written as `token_hash`), and `Rbac.load()` **refuses** a plaintext `token` field by name. Legacy `token_sha256` digests still verify so existing files keep working; `users rotate` rewrites them salted |
 | SEC-013 | Medium | ✅ **Resolved** | `400b73e` (data plane) + `f0bc677` (control plane) — see below |
+| SEC-005 (audit sealing) | Medium | ✅ **Resolved, with limits** | 2026-09-17 - rows carry an HMAC-SHA256 of their chain hash under `AUTOSIEM_AUDIT_SECRET`. Tail truncation and a stolen key remain out of scope; see "SEC-005 (audit sealing) in detail" |
 
 ### SEC-013 in detail — tenancy is now enforced
 
@@ -415,12 +416,72 @@ single-tenant deployments are unaffected by either change.
 ~~1. SEC-006 (finish it)~~ and ~~2. SEC-008 (finish it)~~ — **both closed 2026-09-16**; see
 the resolution table above and "SEC-006 / SEC-008 in detail" below.
 
-1. **SEC-005** — HMAC the audit chain with a key held outside the DB (`AUTOSIEM_AUDIT_SECRET`)
-   so the chain is tamper-*proof*, not just tamper-*evident*. Now the largest open finding.
-2. **SEC-009 / SEC-007 / SEC-012** — actor-from-principal only, fail-closed ingest token, and
+~~1. SEC-005~~ **closed 2026-09-17**, with limits; see "SEC-005 (audit sealing) in detail" below.
+
+1. **SEC-009 / SEC-007 / SEC-012** — actor-from-principal only, fail-closed ingest token, and
    a documented TLS reverse-proxy requirement remain as originally written.
-3. **SEC-017 (the unfixed half)** — feed signing/pinning and an SSRF allow-list; the HTTPS
+2. **SEC-017 (the unfixed half)** — feed signing/pinning and an SSRF allow-list; the HTTPS
    transport rule is done.
+
+### SEC-005 (audit sealing) in detail (fixed 2026-09-17)
+
+**Severity:** Medium. **Status:** Fixed, with the limits below.
+
+Note: two findings in this document carry the number SEC-005. This is the
+audit-chain one; the other, fixed 2026-08-08, is unauthenticated UI reads.
+
+**The weakness.** The SHA-256 chain made tampering *evident* only to someone
+who did not recompute it. A writer with database access could edit a row and
+rebuild every later `prev_hash`/`hash`, and `audit-verify` still said
+`intact`. `test_audit_seal.py::test_the_unsealed_chain_cannot_detect_a_rechained_rewrite`
+performs that attack and asserts it passes, so the weakness is stated as a test
+rather than lost.
+
+**The fix.** With `AUTOSIEM_AUDIT_SECRET` set, each new row stores
+`mac = HMAC-SHA256(key, hash)` in a new nullable column (`mac`; SQLite via the
+in-place column migration, PostgreSQL via `004_audit_mac.sql`). The hash chain
+itself is unchanged, so every existing database still verifies. Because each
+hash covers every row before it, **the first sealed row also protects the
+unsealed history under it**: rewriting a legacy row changes every later hash,
+and the sealed rows' MACs no longer match.
+
+`verify_audit_chain` adds two reasons when the key is present:
+
+- `mac_mismatch`: a sealed row's hash no longer matches its MAC. That means a
+  keyless rewrite, or the key changed.
+- `unsigned_after_signed`: an unsealed row after the first sealed one. This is
+  how a keyless attacker would try to pass rewritten rows off as legacy.
+
+`audit-verify` now also reports `seals_checked`, `sealed_entries` and
+`unsealed_entries`. Without the key it still verifies the hash chain but says
+`seals_checked: false`, so an unkeyed check never reads as a full pass.
+
+**On PostgreSQL** the immutability trigger already stops the application role,
+but the table owner can disable it. `test_postgres.py::test_pg_audit_seal_survives_an_owner_that_disables_the_trigger`
+does exactly that, rewrites a row, recomputes the chain, and asserts the seal
+catches it. Verified on a UTF8 and a SQL_ASCII cluster.
+
+**Missing key: warn, not fail.** Refusing to write audit rows without a key
+would break every existing install on upgrade, and an audit log that stops
+recording is worse than an unsealed one. Without the key, rows are written
+unsealed and a warning is logged once per process.
+
+**Limits, stated plainly:**
+
+- **Tail truncation is not detected.** Deleting the newest rows leaves a
+  shorter chain that still verifies. Catching that needs an external anchor
+  (for example, periodically publishing the latest hash somewhere the database
+  writer cannot reach). Not done.
+- **Whole-log stripping.** An attacker who removes every MAC and rewrites the
+  whole log produces an all-unsealed chain that verifies. `audit-verify` then
+  shows `sealed_entries: 0` on a host that has had the key configured, which
+  an operator will notice but no check enforces.
+- **The key must actually live elsewhere.** An attacker who can read the
+  process environment has the key. The seal only helps against someone who can
+  write the database but not read AutoSIEM's environment: a DB admin, a stolen
+  backup being restored with edits, or SQL injection.
+- **Key rotation is not supported.** A new key makes every older sealed row
+  report `mac_mismatch`. Keep the key stable.
 
 ### SEC-006 / SEC-008 in detail — token storage (fixed 2026-09-16)
 

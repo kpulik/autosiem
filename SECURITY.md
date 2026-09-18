@@ -55,7 +55,11 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
 
 6. **Tamper-Evident Audit Log (`src/autosiem/storage.py`)**
    - SHA-256 hash-chained audit records (`prev_hash` + `hash`).
-   - Integrity verification via `autosiem audit-verify`.
+   - **Sealed with a key held outside the database** when `AUTOSIEM_AUDIT_SECRET` is set (SEC-005):
+     each row stores an HMAC-SHA256 of its chain hash, so a database writer who edits a row and
+     recomputes the chain is caught. Without the key the chain is tamper-evident only.
+   - Integrity verification via `autosiem audit-verify`, which reports `seals_checked` so an
+     unkeyed verification never reads as a full pass.
    - Every user-store mutation (`rbac_user_added`, `rbac_user_removed`, `rbac_token_rotated`, `rbac_token_revoked`) is recorded with the acting principal.
    - The audit log is deliberately **global, not tenant-scoped** — a tenant must not be able to hide its own actions from an operator.
 
