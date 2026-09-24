@@ -450,3 +450,56 @@ def test_pg_audit_seal_survives_an_owner_that_disables_the_trigger(pg, pg_dsn, m
     # Without the key the same rewrite passes, which is the finding.
     monkeypatch.delenv(AUDIT_SECRET_ENV)
     assert pg.verify_audit_chain() == []
+
+
+def test_pg_persists_a_system_one_decision_and_reads_it_back(pg, result, monkeypatch):
+    # PostgresStorage overrides several RelationalStorage methods, so the
+    # decision writer has to be exercised on this path too: the SQLite-only
+    # profile cannot see a break here.
+    from autosiem.system_one import DecisionConfig, DecisionEngine
+    from autosiem.system_one.types import CHOICE, NOUL, DecisionAnswer, DecisionResult
+
+    class Stub:
+        name = "jev"
+
+        def decide(self, state, questions):
+            return DecisionResult(
+                provider="jev",
+                model="jev-1.13.0",
+                answers={
+                    "malicious": DecisionAnswer(
+                        type=NOUL, selected=True, probabilities={"true": 0.93, "false": 0.07}, value=0.93
+                    ),
+                    "severity": DecisionAnswer(type=CHOICE, selected="high", confidence=0.88),
+                    "action": DecisionAnswer(type=CHOICE, selected="investigate", confidence=0.9),
+                    "needs_llm_analysis": DecisionAnswer(
+                        type=NOUL, selected=False, probabilities={"true": 0.2, "false": 0.8}, value=0.2
+                    ),
+                },
+                latency_ms=71.5,
+            )
+
+    engine = DecisionEngine(DecisionConfig(provider="jev"), providers={"jev": Stub()})
+    incident = result.incidents[0]
+    related = [f for f in result.findings if f.finding_id in incident.finding_ids]
+    result.decisions[incident.incident_id] = engine.assess(incident, related)
+
+    pg.save_pipeline_result(result, "a")
+    row = pg.get_decision(incident.incident_id, "a")
+    assert row is not None
+    assert row["provider"] == "jev" and row["model"] == "jev-1.13.0"
+    assert row["severity"] == "high" and row["action"] == "investigate"
+    assert float(row["malicious"]) == pytest.approx(0.93)
+    assert float(row["latency_ms"]) == pytest.approx(71.5)
+    assert row["disposition"] == "accepted"
+
+    # Tenant-scoped like every other row: another tenant cannot see it.
+    assert pg.get_decision(incident.incident_id, "b") is None
+    assert pg.decision_stats("a")["total"] == len(result.incidents)
+    assert pg.decision_stats("b")["total"] == 0
+    # It rides in the incident bundle the API serves.
+    bundle = pg.get_incident_bundle(incident.incident_id, "a")
+    assert bundle is not None and bundle["system_one"]["provider"] == "jev"
+    # Re-saving the same result must not blow up on the composite key.
+    pg.save_pipeline_result(result, "a")
+    assert pg.verify_audit_chain() == []

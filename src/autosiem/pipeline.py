@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -21,6 +21,7 @@ from .schemas import DetectionRule, Finding, Incident, NormalizedEvent
 from .soar import SoarPlanner
 from .soc_runtime import AIAnalystRuntime, ActionProposal, EventSearcher, Investigation
 from .suppression import SuppressionEngine
+from .system_one import DecisionEngine, DecisionOutcome
 from .threat_intel import ThreatIntelMatcher
 
 
@@ -48,6 +49,9 @@ class PipelineResult:
     #: from the call itself rather than inferred from the audit log, so a
     #: configured-but-failing backend is never reported as "used an LLM".
     llm_reports: set[str] = field(default_factory=set)
+    #: Per-incident System One assessments. Empty unless a decision provider is
+    #: configured; advisory only, and never applied to severity or policy.
+    decisions: dict[str, DecisionOutcome] = field(default_factory=dict)
 
 
 class AutoSIEMPipeline:
@@ -65,6 +69,7 @@ class AutoSIEMPipeline:
         tenant_id: str | None = None,
         baseline_store: BaselineStore | None = None,
         enrichment: EnrichmentRegistry | None = None,
+        decision_engine: DecisionEngine | None = None,
     ) -> None:
         self.rules = rules
         self.baseline_store = baseline_store
@@ -83,6 +88,9 @@ class AutoSIEMPipeline:
         self.rag = rag
         self.soar = soar
         self.feedback = feedback
+        # Optional System One layer. None, or a disabled engine, leaves every
+        # stage below behaving exactly as it did before.
+        self.decision_engine = decision_engine
 
     def _load_detector(self) -> AnomalyDetector:
         """Resume the stored behavioral baseline, or start a fresh one."""
@@ -145,7 +153,16 @@ class AutoSIEMPipeline:
         for incident in result.incidents:
             related = [finding for finding in result.findings if finding.finding_id in incident.finding_ids]
             rag_context = self.rag.build_prompt(incident) if self.rag else ""
-            if self.llm and self.llm.enabled:
+            # System One runs between correlation and the generative step, so a
+            # cheap typed decision can inform whether the expensive narrative
+            # one is worth making. It cannot change severity, risk or policy.
+            outcome = self._assess(incident, related, result)
+            llm_available = bool(self.llm and self.llm.enabled)
+            if outcome is not None and self.decision_engine is not None:
+                llm_available = self.decision_engine.should_run_llm(
+                    outcome, llm_available=llm_available
+                )
+            if llm_available and self.llm:
                 annotation = self.llm.annotate(incident, related, extra_context=rag_context)
                 report = annotation.report
                 decision_override = annotation.decision
@@ -153,6 +170,8 @@ class AutoSIEMPipeline:
                 # call can fail and fall back to the local investigator.
                 if annotation.used_llm:
                     result.llm_reports.add(incident.incident_id)
+                    if outcome is not None:
+                        outcome = replace(outcome, llm_escalated=True)
             else:
                 report = self.investigator.explain(incident, result.findings)
                 if rag_context:
@@ -165,8 +184,30 @@ class AutoSIEMPipeline:
             if self.soar:
                 investigation = self._apply_soar_plan(investigation, incident, related)
             result.investigations[incident.incident_id] = investigation
+            if outcome is not None:
+                result.decisions[incident.incident_id] = outcome
         self._persist_baseline()
         return result
+
+    def _assess(
+        self, incident: Incident, related: list[Finding], result: PipelineResult
+    ) -> DecisionOutcome | None:
+        """Run the System One step, or return None when it is not configured.
+
+        Errors are swallowed by the engine itself; this guard exists so that a
+        provider constructed outside the engine can still never break ingest.
+        """
+        if self.decision_engine is None or not self.decision_engine.enabled:
+            return None
+        event_ids = {finding.event_id for finding in related}
+        events = [event for event in result.events if event.event_id in event_ids]
+        try:
+            return self.decision_engine.assess(incident, related, events=events)
+        except Exception as exc:  # pragma: no cover - engine.assess never raises
+            logging.getLogger(__name__).warning(
+                "System One assessment skipped (%s)", type(exc).__name__
+            )
+            return None
 
     def _apply_soar_plan(
         self, investigation: Investigation, incident: Incident, findings: list[Finding]

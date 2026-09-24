@@ -14,6 +14,10 @@ from .rbac import ROLE_PERMISSIONS, ROLES, Rbac
 from .storage import DEFAULT_DB_PATH, DEFAULT_TENANT, RelationalStorage, open_storage
 from .llm import LLMService, config_from_env
 from .suppression import DEFAULT_CREATED_BY, VALID_ACTIONS, Suppression, SuppressionEngine
+from .system_one import SECURITY_QUESTIONS, DecisionEngine
+from .system_one import baseline as decision_baseline
+from .system_one import config_from_env as decision_config_from_env
+from .system_one import evaluation as decision_eval
 from .coverage import coverage_report
 from .metrics import MetricsRegistry, prometheus_text
 from .querygen import translate_query, to_cli_flags
@@ -251,6 +255,22 @@ def main() -> None:
     audit_verify = sub.add_parser("audit-verify", help="Verify the audit log hash chain")
     _add_db_arg(audit_verify)
 
+    decisions = sub.add_parser("decisions", help="Show System One configuration and stored decision stats")
+    _add_db_arg(decisions)
+
+    evaluate = sub.add_parser(
+        "evaluate-decisions",
+        help="Score the deterministic path, Jev and Laya on the same labelled incidents",
+    )
+    evaluate.add_argument("--cases", required=True, help="JSON array or JSONL file of labelled cases")
+    evaluate.add_argument(
+        "--provider", action="append",
+        help="Limit to one path (autosiem|jev|laya); repeatable. Default: every available path",
+    )
+    evaluate.add_argument("--json-out", help="Also write the full machine-readable results here")
+    evaluate.add_argument("--format", choices=("text", "json"), default="text", help="stdout format")
+    evaluate.add_argument("--ece-bins", type=int, default=10, help="Bins for the calibration error (default 10)")
+
     distributed = sub.add_parser("distributed", help="Show distributed pipeline configuration and queue/archive state")
     _add_db_arg(distributed)
     distributed.add_argument("--rules", default=str(DEFAULT_RULE_PATH), help="Rule file or directory")
@@ -277,6 +297,10 @@ def main() -> None:
                         help="Maximum records to deliver in one pass, 1-1000 (default: 100)")
 
     args = parser.parse_args()
+    if args.command == "evaluate-decisions":
+        _run_evaluate_decisions(args)
+        return
+
     if args.command in {"migrate", "outbox"}:
         try:
             _run_postgres_command(args)
@@ -466,6 +490,9 @@ def main() -> None:
             "sealed_entries": seal["sealed_entries"],
             "unsealed_entries": seal["unsealed_entries"],
         })
+    elif args.command == "decisions":
+        config = decision_config_from_env()
+        _print_json({"config": config.describe(), "stored": store.decision_stats()})
     elif args.command == "distributed":
         _run_distributed(args)
     elif args.command == "users":
@@ -635,12 +662,17 @@ def _run_pipeline_command(args: argparse.Namespace, suppression_engine: Suppress
     # Threat-intel indicators double as an enrichment source.
     enricher = enrichment_from_env(indicators=load_intel_state(default_intel_state(args.db)))
 
+    # Optional System One layer. Disabled unless AUTOSIEM_DECISION_PROVIDER names
+    # a provider, in which case it annotates incidents without touching severity,
+    # risk or the policy gates.
+    decider = _make_decision_engine()
+
     # Check for distributed mode via environment variables
     dist_config = distributed_config_from_env()
     
     if args.command == "ingest":
         lines = Path(args.file).read_text(encoding="utf-8").splitlines()
-        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher)
+        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher, decision_engine=decider)
         # When distributed components are configured, they wrap this one
         # pipeline (archive -> queue -> process -> backend -> ack). Running the
         # standard pipeline as well would process every event twice.
@@ -654,14 +686,128 @@ def _run_pipeline_command(args: argparse.Namespace, suppression_engine: Suppress
         if not health.ok:
             print(json.dumps({"connector": args.connector, "error": health.detail}, indent=2))
         lines = [json.dumps(event) for event in events]
-        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher)
+        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher, decision_engine=decider)
         return finish(pipeline.process_lines(lines))
     # `demo` deliberately does NOT persist the behavioral baseline. Its events
     # carry fixed timestamps, so replaying them stacks several events onto the
     # same instant and trips the burst signal on every re-run. Real ingest paths
     # advance in time and do keep a warm baseline.
     lines = [json.dumps(event) for event in DEMO_EVENTS]
-    return finish(AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, enrichment=enricher).process_lines(lines))
+    return finish(AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, enrichment=enricher, decision_engine=decider).process_lines(lines))
+
+
+def _print_system_one(result: PipelineResult, incident_id: str) -> None:
+    """Print the System One assessment for one incident, if there is one.
+
+    Probabilities are shown as probabilities, and the block says plainly that
+    the deterministic severity is the one that counts, so nobody reads the
+    model's severity as the incident's severity.
+    """
+    outcome = getattr(result, "decisions", {}).get(incident_id)
+    if outcome is None or not outcome.available or outcome.result is None:
+        if outcome is not None and outcome.errors:
+            print("\n=== System One Assessment ===")
+            print("Unavailable (deterministic result stands):")
+            for error in outcome.errors:
+                print(f"- {error}")
+        return
+    decision = outcome.result
+    print("\n=== System One Assessment (advisory) ===")
+    print(f"Provider: {decision.provider} ({decision.model})" + ("  [fallback]" if decision.fallback_used else ""))
+
+    def _show(label: str, name: str) -> None:
+        answer = decision.answer(name)
+        if answer is None:
+            return
+        if answer.type == "noul":
+            print(f"{label}: {answer.value:.2f}" if answer.value is not None else f"{label}: n/a")
+        else:
+            confidence = f" ({answer.confidence:.2f})" if answer.confidence is not None else ""
+            print(f"{label}: {answer.selected}{confidence}")
+
+    _show("Malicious", "malicious")
+    _show("Severity", "severity")
+    _show("Action", "action")
+    _show("Needs LLM Analysis", "needs_llm_analysis")
+    print(f"Latency: {decision.latency_ms:.0f} ms")
+    print(f"Weight: {outcome.disposition}")
+    for note in outcome.notes:
+        print(f"- {note}")
+
+
+def _make_decision_engine() -> DecisionEngine | None:
+    """The System One engine, or None when no provider is configured."""
+    config = decision_config_from_env()
+    if not config.enabled:
+        return None
+    return DecisionEngine(config)
+
+
+def _decision_paths(config: Any) -> tuple[dict[str, Any], dict[str, str]]:
+    """Decision paths available for evaluation, plus why any are missing.
+
+    The deterministic AutoSIEM path is always available. Jev needs a key; Laya
+    needs the optional extra. A missing provider is reported, never silently
+    skipped and never simulated.
+    """
+    from .system_one.providers import JevDecisionProvider, LayaDecisionProvider
+
+    paths: dict[str, Any] = {"autosiem": decision_baseline.decide}
+    skipped: dict[str, str] = {}
+
+    if config.jev.configured:
+        jev = JevDecisionProvider(config.jev)
+        paths["jev"] = lambda state, _p=jev: _p.decide(state, SECURITY_QUESTIONS)
+    else:
+        skipped["jev"] = "TYPESAFE_API_KEY is not set"
+
+    try:  # importable means the extra is installed; the model loads lazily
+        import laya  # type: ignore[import-not-found]  # noqa: F401
+    except ImportError:
+        skipped["laya"] = "laya is not installed (pip install '.[laya]')"
+    else:
+        local = LayaDecisionProvider(config.laya)
+        paths["laya"] = lambda state, _p=local: _p.decide(state, SECURITY_QUESTIONS)
+    return paths, skipped
+
+
+def _run_evaluate_decisions(args: argparse.Namespace) -> None:
+    """Score every available decision path on the same labelled cases."""
+    try:
+        cases = decision_eval.load_cases(args.cases)
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"could not read labelled cases from {args.cases}: {exc}") from None
+    if not cases:
+        raise SystemExit(f"no labelled cases in {args.cases}")
+
+    config = decision_config_from_env()
+    paths, skipped = _decision_paths(config)
+    if args.provider:
+        wanted = set(args.provider)
+        unknown = wanted - set(paths) - set(skipped)
+        if unknown:
+            raise SystemExit(f"unknown decision path(s): {', '.join(sorted(unknown))}")
+        paths = {name: runner for name, runner in paths.items() if name in wanted}
+        if not paths:
+            raise SystemExit(
+                "none of the requested paths are available: "
+                + "; ".join(f"{name}: {reason}" for name, reason in sorted(skipped.items()))
+            )
+
+    results = decision_eval.evaluate(cases, paths, SECURITY_QUESTIONS, ece_bins=args.ece_bins)
+    for name, reason in skipped.items():
+        if not args.provider or name in set(args.provider):
+            results.setdefault("paths", {})[name] = {"path": name, "skipped_reason": reason}
+    results["config"] = config.describe()
+
+    if args.json_out:
+        Path(args.json_out).write_text(json.dumps(results, indent=2, default=str) + "\n", encoding="utf-8")
+    if args.format == "json":
+        _print_json(results)
+    else:
+        print(decision_eval.render_report(results), end="")
+        if args.json_out:
+            print(f"machine-readable results written to {args.json_out}")
 
 
 def _make_threat_intel(args: argparse.Namespace) -> ThreatIntelMatcher | None:
@@ -899,6 +1045,7 @@ def _print_pipeline_result(result: PipelineResult, saved: bool, db: str) -> None
     })
     if result.incidents:
         top = result.incidents[0]
+        _print_system_one(result, top.incident_id)
         print("\n=== AI Investigation Report ===")
         print(result.reports[top.incident_id])
         investigation = result.investigations[top.incident_id]
