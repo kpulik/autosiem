@@ -34,6 +34,10 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
      `secrets.compare_digest` (SEC-006). Legacy unsalted `token_sha256` digests still verify;
      `users rotate` rewrites them in the salted format.
    - Token rotation and revocation (`users rotate|revoke`, `POST /api/users/{name}/rotate-token|revoke-token`), gated on `users:manage`.
+   - `AUTOSIEM_INGEST_TOKEN` is a write-only collector credential: outside RBAC mode it authenticates `POST /api/ingest` and nothing else (SEC-007).
+   - The audit actor is derived only from how a request authenticated: the RBAC user's name, else `api-token`, `ingest-token` or `unauthenticated`. No endpoint accepts a caller-supplied actor (SEC-009).
+   - Every token comparison is constant-time over bytes, so a malformed header yields 401, never a 500.
+   - AutoSIEM does not terminate TLS. Anything beyond loopback belongs behind a TLS reverse proxy with uvicorn on `127.0.0.1` and no `--reload` (SEC-012); see `docs/deployment-and-collection.md`.
    - Tokens are accepted as `Authorization: Bearer`, `x-api-key`, or an `autosiem_token` cookie, so the browser UI is usable under RBAC.
 
 2. **UI Protection (`src/autosiem/web/api.py`)**

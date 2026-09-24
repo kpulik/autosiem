@@ -160,10 +160,40 @@ Filebeat/Vector/Fluent Bit → JSONL HTTP endpoint (`POST /api/ingest`, ndjson b
 [sinks.autosiem]
 type = "http"
 inputs = ["parsed"]
-uri = "http://127.0.0.1:8000/api/ingest"
+uri = "http://127.0.0.1:8000/api/ingest"   # loopback only; use https:// through a proxy otherwise
 encoding.codec = "ndjson"
-# request.headers.AUTOSIEM_INGEST_TOKEN = "${AUTOSIEM_INGEST_TOKEN}"
+# The server reads x-api-key or Authorization: Bearer, never a header named
+# after the environment variable.
+request.headers.x-api-key = "${AUTOSIEM_INGEST_TOKEN}"
 ```
+
+`AUTOSIEM_INGEST_TOKEN` is a write-only credential: outside RBAC mode it
+authenticates `POST /api/ingest` and nothing else, so a collector never needs
+the admin-equivalent `AUTOSIEM_API_TOKEN`. In RBAC mode ingest still needs a
+user with the `ingest` role; the ingest token is then an additional check.
+
+### Exposing the API beyond localhost
+
+AutoSIEM does not terminate TLS. Over plain `http://`, every bearer token
+(API, ingest, RBAC users) and every event crosses the network in cleartext.
+Anything beyond loopback belongs behind a TLS reverse proxy, with uvicorn bound
+to `127.0.0.1` and run **without** `--reload`. A minimal Caddy config, which
+obtains and renews the certificate itself:
+
+```caddyfile
+siem.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+```bash
+AUTOSIEM_RBAC_FILE=data/rbac_users.json \
+PYTHONPATH=src uvicorn autosiem.web.api:app --host 127.0.0.1 --port 8000
+```
+
+Collectors then send to `https://siem.example.com/api/ingest`. The syslog/CEF
+UDP listener has no TLS either; keep it on a trusted segment and use its
+source-IP allowlist.
 
 ### 4. Source-health view
 

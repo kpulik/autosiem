@@ -53,7 +53,6 @@ from autosiem.rbac import (
 )
 from autosiem.rules import apply_rule_state, load_rules
 from autosiem.soar import SoarPlanner
-from autosiem.suppression import DEFAULT_CREATED_BY
 from autosiem.storage import DEFAULT_DB_PATH, RelationalStorage, StorageConflict, open_storage
 
 INCIDENT_STATUSES = ("open", "investigating", "resolved", "closed")
@@ -117,6 +116,34 @@ def _bearer_token(request: Request) -> str | None:
     return request.cookies.get(TOKEN_COOKIE)
 
 
+def _tokens_equal(presented: str, expected: str) -> bool:
+    """Constant-time token comparison that cannot raise on odd input.
+
+    Starlette decodes headers as latin-1, so a single non-ASCII byte arrives
+    as a non-ASCII ``str``, and ``secrets.compare_digest`` refuses to compare
+    those with a TypeError, which surfaced as a 500 rather than a 401.
+    Comparing the UTF-8 bytes accepts any input.
+    """
+    return secrets.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
+
+
+def _ingest_token_matches(request: Request) -> bool:
+    """True when AUTOSIEM_INGEST_TOKEN is set and the request presents it.
+
+    Checked in ``x-api-key`` and ``Authorization: Bearer`` independently, so a
+    client can send the API token in one header and the ingest token in the
+    other. Never the cookie: this is a machine endpoint.
+    """
+    token = os.environ.get("AUTOSIEM_INGEST_TOKEN")
+    if not token:
+        return False
+    presented = [request.headers.get("x-api-key", "")]
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        presented.append(auth[len("bearer "):].strip())
+    return any(_tokens_equal(value, token) for value in presented if value)
+
+
 def _require_permission(request: Request, permission: str) -> None:
     """Enforce a role permission in RBAC mode; legacy mode grants everything.
 
@@ -155,11 +182,23 @@ def _validate_csrf(request: Request, form: Any) -> None:
         raise HTTPException(status_code=403, detail="invalid csrf token")
 
 
-def _actor(request: Request, default: str = "analyst") -> str:
-    """Audit actor: the authenticated RBAC user, else the caller-supplied default."""
+#: Audit actor recorded when a request authenticated without a named user.
+_UNNAMED_ACTORS = {"api_token": "api-token", "ingest_token": "ingest-token"}
+
+
+def _actor(request: Request) -> str:
+    """Audit actor, derived only from how the request authenticated (SEC-009).
+
+    Never from caller input. Endpoints used to take an ``?actor=`` parameter
+    that shared-token mode wrote to the audit log verbatim, so any caller could
+    record an approval under someone else's name. Without an RBAC user the
+    actor names the credential that was used, which is all that is known.
+    """
     user: Any = getattr(request.state, "user", None)
     name = getattr(user, "name", None)
-    return name or default
+    if name:
+        return name
+    return _UNNAMED_ACTORS.get(getattr(request.state, "auth_mode", ""), "unauthenticated")
 
 
 def _tenant(request: Request) -> str | None:
@@ -239,11 +278,19 @@ async def _api_auth_middleware(request: Request, call_next: Any) -> Any:
         request.state.user = user
         return await call_next(request)
 
+    # SEC-007: a log collector should hold a write-only credential, not the
+    # admin-equivalent API token. Outside RBAC mode the ingest token alone
+    # authenticates POST /api/ingest, and nothing else.
+    if path == "/api/ingest" and method == "POST" and _ingest_token_matches(request):
+        request.state.auth_mode = "ingest_token"
+        return await call_next(request)
+
     # Legacy mode: single shared token, caller is implicitly admin.
     api_token = os.environ.get("AUTOSIEM_API_TOKEN")
     if api_token:
-        if not secrets.compare_digest(token or "", api_token):
+        if not _tokens_equal(token or "", api_token):
             return _unauthorized(request, "unauthorized")
+        request.state.auth_mode = "api_token"
         return await call_next(request)
 
     # No auth configured: fail closed unless explicitly insecure (SEC-001)
@@ -254,6 +301,7 @@ async def _api_auth_middleware(request: Request, call_next: Any) -> Any:
             "(or AUTOSIEM_AUTH_INSECURE=1 for local development)",
         )
 
+    request.state.auth_mode = "insecure"
     return await call_next(request)
 
 
@@ -361,7 +409,7 @@ def _audit_user_change(request: Request, action: str, target: str, details: dict
     """Record a user-store mutation in the hash-chained audit log."""
     store = get_store()
     with store.connect() as conn:
-        store.audit(conn, actor=_actor(request, "admin"), action=action, target=target, details=details, tenant_id=_tenant(request))
+        store.audit(conn, actor=_actor(request), action=action, target=target, details=details, tenant_id=_tenant(request))
 
 
 @app.get("/api/users")
@@ -429,9 +477,9 @@ def api_revoke_token(request: Request, name: str) -> dict[str, Any]:
 
 
 @app.post("/api/proposals/{proposal_id}/approve")
-def api_approve(request: Request, proposal_id: str, actor: str = "analyst") -> dict[str, Any]:
+def api_approve(request: Request, proposal_id: str) -> dict[str, Any]:
     _require_permission(request, PERM_APPROVE)
-    actor = _actor(request, actor)
+    actor = _actor(request)
     proposal = get_store().decide_proposal(proposal_id, "approved", actor=actor, tenant_id=_tenant(request))
     if not proposal:
         raise HTTPException(status_code=404, detail="proposal_not_found")
@@ -439,9 +487,9 @@ def api_approve(request: Request, proposal_id: str, actor: str = "analyst") -> d
 
 
 @app.post("/api/proposals/{proposal_id}/reject")
-def api_reject(request: Request, proposal_id: str, actor: str = "analyst") -> dict[str, Any]:
+def api_reject(request: Request, proposal_id: str) -> dict[str, Any]:
     _require_permission(request, PERM_APPROVE)
-    actor = _actor(request, actor)
+    actor = _actor(request)
     proposal = get_store().decide_proposal(proposal_id, "rejected", actor=actor, tenant_id=_tenant(request))
     if not proposal:
         raise HTTPException(status_code=404, detail="proposal_not_found")
@@ -473,9 +521,9 @@ async def api_add_suppression(request: Request) -> dict[str, Any]:
 
 
 @app.delete("/api/suppressions/{suppression_id}")
-def api_delete_suppression(request: Request, suppression_id: str, actor: str = DEFAULT_CREATED_BY) -> dict[str, Any]:
+def api_delete_suppression(request: Request, suppression_id: str) -> dict[str, Any]:
     _require_permission(request, PERM_SUPPRESS_MANAGE)
-    actor = _actor(request, actor)
+    actor = _actor(request)
     deleted = get_store().delete_suppression(suppression_id, actor=actor, tenant_id=_tenant(request))
     if not deleted:
         raise HTTPException(status_code=404, detail="suppression_not_found")
@@ -483,9 +531,9 @@ def api_delete_suppression(request: Request, suppression_id: str, actor: str = D
 
 
 @app.post("/api/incidents/{incident_id}/update")
-async def api_update_incident(incident_id: str, request: Request, actor: str = "analyst") -> dict[str, Any]:
+async def api_update_incident(incident_id: str, request: Request) -> dict[str, Any]:
     _require_permission(request, PERM_INCIDENT_UPDATE)
-    actor = _actor(request, actor)
+    actor = _actor(request)
     body = await request.json()
     updated = get_store().update_incident(
         incident_id,
@@ -508,9 +556,9 @@ def api_incident_comments(request: Request, incident_id: str) -> list[dict[str, 
 
 
 @app.post("/api/incidents/{incident_id}/comments")
-async def api_add_incident_comment(incident_id: str, request: Request, actor: str = "analyst") -> dict[str, Any]:
+async def api_add_incident_comment(incident_id: str, request: Request) -> dict[str, Any]:
     _require_permission(request, PERM_INCIDENT_UPDATE)
-    actor = _actor(request, actor)
+    actor = _actor(request)
     body = await request.json()
     comment = get_store().add_incident_comment(incident_id, actor, str(body.get("body", "")), tenant_id=_tenant(request))
     if not comment:
@@ -580,13 +628,14 @@ def _parse_ingest_payload(raw: bytes, content_type: str) -> list[dict[str, Any]]
 
 
 def _ingest_authorized(request: Request) -> bool:
-    """Allow when no token is configured, or the request presents it."""
-    token = os.environ.get("AUTOSIEM_INGEST_TOKEN")
-    if not token:
+    """Allow when no ingest token is configured, or the request presents it.
+
+    "No token configured" is not open: the middleware has already required
+    RBAC, the API token, or an explicit AUTOSIEM_AUTH_INSECURE=1.
+    """
+    if not os.environ.get("AUTOSIEM_INGEST_TOKEN"):
         return True
-    if request.headers.get("x-api-key") == token:
-        return True
-    return request.headers.get("authorization", "") == f"Bearer {token}"
+    return _ingest_token_matches(request)
 
 
 @app.post("/api/ingest")
@@ -676,9 +725,9 @@ async def api_test_rule(request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/rules/{rule_id}")
-async def api_set_rule(rule_id: str, request: Request, actor: str = "analyst") -> dict[str, Any]:
+async def api_set_rule(rule_id: str, request: Request) -> dict[str, Any]:
     _require_permission(request, PERM_RULES_MANAGE)
-    actor = _actor(request, actor)
+    actor = _actor(request)
     body = await request.json()
     enabled = bool(body.get("enabled"))
     return get_store().set_rule_enabled(rule_id, enabled, actor=actor, tenant_id=_tenant(request))
@@ -1023,7 +1072,7 @@ async def ui_toggle_rule(rule_id: str, request: Request) -> RedirectResponse:
     form = await request.form()
     _validate_csrf(request, form)
     enabled = _form_str(form, "enabled") == "1"
-    actor = _actor(request, "analyst")
+    actor = _actor(request)
     get_store().set_rule_enabled(rule_id, enabled, actor=actor, tenant_id=_tenant(request))
     return RedirectResponse("/rules", status_code=303)
 
@@ -1085,7 +1134,7 @@ async def ui_add_suppression(request: Request) -> RedirectResponse:
     _require_permission(request, PERM_SUPPRESS_MANAGE)
     form = await request.form()
     _validate_csrf(request, form)
-    actor = _actor(request, DEFAULT_CREATED_BY)
+    actor = _actor(request)
     get_store().add_suppression(
         rule_id=_form_str(form, "rule_id"),
         name=_form_str(form, "name"),
@@ -1105,7 +1154,7 @@ async def ui_delete_suppression(request: Request, suppression_id: str) -> Redire
     _require_permission(request, PERM_SUPPRESS_MANAGE)
     form = await request.form()
     _validate_csrf(request, form)
-    actor = _actor(request, DEFAULT_CREATED_BY)
+    actor = _actor(request)
     get_store().delete_suppression(suppression_id, actor=actor, tenant_id=_tenant(request))
     return RedirectResponse("/suppressions", status_code=303)
 
@@ -1115,7 +1164,7 @@ async def ui_update_incident(incident_id: str, request: Request) -> RedirectResp
     _require_permission(request, PERM_INCIDENT_UPDATE)
     form = await request.form()
     _validate_csrf(request, form)
-    actor = _actor(request, "analyst")
+    actor = _actor(request)
     get_store().update_incident(
         incident_id,
         status=_form_str(form, "status"),
@@ -1132,7 +1181,7 @@ async def ui_add_comment(incident_id: str, request: Request) -> RedirectResponse
     _require_permission(request, PERM_INCIDENT_UPDATE)
     form = await request.form()
     _validate_csrf(request, form)
-    actor = _actor(request, "analyst")
+    actor = _actor(request)
     body = (_form_str(form, "body") or "").strip()
     if body:
         get_store().add_incident_comment(incident_id, actor, body)
