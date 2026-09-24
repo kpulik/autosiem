@@ -239,6 +239,152 @@ AUTOSIEM_LLM_BACKEND=openai_compat AUTOSIEM_LLM_MODEL=<model-name> AUTOSIEM_LLM_
 
 Safety stays intact: secrets are redacted before leaving the process, LLM output is schema-validated, and decisions still run through policy so high-impact actions require approval. If the model is unavailable, the pipeline silently falls back to the local investigator. See `docs/ai-soc-runtime.md` for the full backend and env-var reference.
 
+## System One decision layer (optional)
+
+The LLM layer above writes prose. A **System One** model does the opposite: it
+answers typed questions about an incident with a value and a probability, in tens
+of milliseconds, and nothing else. AutoSIEM can use one as an extra signal on a
+correlated incident, asking four questions in a single call:
+
+| Question | Type | Answers |
+|---|---|---|
+| `malicious` | noul (yes/no + probability) | is this genuinely security-relevant |
+| `severity` | choice | informational / low / medium / high / critical |
+| `action` | choice | suppress / monitor / enrich / investigate / escalate |
+| `needs_llm_analysis` | noul | is it murky enough to deserve a narrative write-up |
+
+**It is advisory, and that is the whole design.** The deterministic rules, UEBA
+scoring, risk model and policy gates stay authoritative. A System One answer
+never changes a severity, never approves an action, and never shortens an
+approval path; a disagreement is recorded on the incident and the engine's
+verdict stands. If the provider is slow, wrong, unreachable or absent, AutoSIEM
+behaves exactly as it does with the feature switched off. It is off by default.
+
+### Jev versus Laya
+
+| | **Jev** (TypeSafe) | **Laya** (`laya-typed-decisions`) |
+|---|---|---|
+| Where it runs | hosted API, **remote** | your hardware, **local** |
+| Licence | proprietary | Apache 2.0, open weights |
+| Needs | `TYPESAFE_API_KEY` | `pip install '.[laya]'` (~421M params) |
+| Cost | $0.042 per million input tokens, output free | electricity |
+| Data leaves the host | **yes** | no |
+
+Both answer the same question shapes, so AutoSIEM normalizes them into one
+internal result and the rest of the system cannot tell which model replied.
+
+### Configuration
+
+```bash
+# Off by default. Nothing below is required.
+AUTOSIEM_DECISION_PROVIDER=jev        # none (default) | jev | laya
+AUTOSIEM_DECISION_FALLBACK=laya       # none (default) | jev | laya
+
+# Jev (hosted). Never commit the key; read it from the environment.
+TYPESAFE_API_KEY=sk-...
+AUTOSIEM_JEV_MODEL=jev-latest
+AUTOSIEM_JEV_TIMEOUT=10
+AUTOSIEM_JEV_RETRIES=2
+
+# Laya (local). Lazily loaded, so a Jev-only install never pays for it.
+AUTOSIEM_LAYA_MODEL=convaiinnovations/laya-typed-decisions
+AUTOSIEM_LAYA_DEVICE=auto             # auto picks CUDA, then Apple MPS, then CPU
+
+# Thresholds, with their defaults.
+AUTOSIEM_DECISION_ACCEPT_CONFIDENCE=0.75
+AUTOSIEM_DECISION_REVIEW_CONFIDENCE=0.5
+AUTOSIEM_DECISION_FALLBACK_ON_LOW_CONFIDENCE=0   # see below
+AUTOSIEM_DECISION_GATE_LLM=0                     # see below
+```
+
+Confidence is treated as a signal, not as truth. At or above the accept
+threshold the classification is recorded as an accepted signal; between the two
+thresholds it is marked for review; below the review threshold it is kept but
+carries no weight, which is the same as having no answer.
+
+### Fallback
+
+```
+Jev answers               -> use it
+Jev times out / errors /
+  returns something invalid -> try Laya, and mark fallback_used
+Laya answers              -> use it
+both fail                 -> deterministic AutoSIEM behaviour, unchanged
+```
+
+A **low-confidence answer is not a failure**, so it does not trigger fallback.
+Shopping for a more confident second opinion is opt-in
+(`AUTOSIEM_DECISION_FALLBACK_ON_LOW_CONFIDENCE=1`), because a model that is
+honestly unsure is giving you information, not an error.
+
+### How it interacts with the LLM layer
+
+They do different jobs: System One classifies, the LLM explains. By default
+enabling System One changes nothing about when the generative model runs. Set
+`AUTOSIEM_DECISION_GATE_LLM=1` and a confident `needs_llm_analysis=false` may
+skip the narrative call for clear-cut incidents; an ambiguous or low-confidence
+assessment always lets it run.
+
+### Privacy
+
+Jev is remote, so the state is built by whitelist, not by filter:
+
+- Summarised signals, not log dumps: counts, named UEBA signals, rule ids,
+  entity kinds, the deterministic severity and risk score.
+- Only named raw fields (`process_name`, `command_line`, `url`, ...) are copied
+  from an event; everything else stays local.
+- Every string passes through the existing redactor, so bearer tokens, API keys
+  and private keys are masked even inside a whitelisted command line.
+- Field names that look like credentials are never copied at all.
+- Caps on how many findings and events are included.
+
+Run Laya instead if nothing may leave the host at all.
+
+### Using it
+
+```bash
+# Annotate incidents during any ingest path
+AUTOSIEM_DECISION_PROVIDER=jev TYPESAFE_API_KEY=... \
+  PYTHONPATH=src python3 -m autosiem.cli demo --db data/autosiem.db
+
+# Configuration and what has been recorded so far
+PYTHONPATH=src python3 -m autosiem.cli decisions --db data/autosiem.db
+```
+
+The assessment appears in the CLI run output, on `cli incident --id <id>`, and
+in the JSON API's incident bundle under `system_one`:
+
+```
+=== System One Assessment (advisory) ===
+Provider: jev (jev-1.13.0)
+Malicious: 0.94
+Severity: high (0.87)
+Action: investigate (0.91)
+Needs LLM Analysis: 0.18
+Latency: 84 ms
+Weight: accepted
+- disagrees with the deterministic severity: model 'high' vs engine 'critical' (engine wins)
+```
+
+### Benchmarks
+
+Compare the deterministic path against each model on identical labelled
+incidents. It runs with whatever is available, so it works with no API key and
+no local model, and says which paths it skipped and why:
+
+```bash
+PYTHONPATH=src python3 -m autosiem.cli evaluate-decisions \
+  --cases my_labelled_incidents.json --json-out results.json
+```
+
+Reported per path and per question: accuracy, a confusion matrix, Brier score
+for the probabilistic yes/no call, expected calibration error with its bin
+count, latency mean/p50/p95, error and fallback rates, and token cost for
+providers that report usage (a local model reports none, so no cost is invented
+for it). A case is `{"id": ..., "state": {...}, "labels": {...}}`; build `state`
+with `autosiem.system_one.build_state`. There is no bundled labelled dataset
+yet, so bring your own.
+
 ## Documentation
 
 - `docs/tutorial.md` — start here (20-minute beginner walkthrough)
@@ -246,6 +392,7 @@ Safety stays intact: secrets are redacted before leaving the process, LLM output
 - `docs/roadmap.md` — current status and the phased plan
 - `docs/deployment-and-collection.md` — how real deployments get data in
 - `docs/ai-soc-runtime.md` — the AI analyst runtime, LLM config, and safety model
+- `docs/system-one.md` — the typed decision layer: providers, thresholds, evaluation
 - `docs/siem-research-2026.md` — the 2026 SIEM landscape research baseline
 - `docs/product-vision-ai-soc.md` — the end-state product vision
 

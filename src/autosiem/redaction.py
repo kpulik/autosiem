@@ -21,12 +21,17 @@ import re
 # Common labelled credentials: password=x, "token":"y", access_token=z, ...
 _LABELLED_SECRET = re.compile(
     r"(\b(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|authorization|access[_-]?token)\b\s*[:=]\s*)"
-    r"([\"'][^\"']*[\"']|[^\s,;}\]]+)",
+    # An "Authorization: Bearer <token>" value is two words, and matching only
+    # the first left the token in place: this pattern consumed the word Bearer,
+    # which then removed the anchor _HIGH_ENTROPY needed to catch the rest.
+    r"((?:Bearer\s+)?(?:[\"'][^\"']*[\"']|[^\s,;}\]]+))",
     re.IGNORECASE,
 )
 # High-entropy / bearer-like fragments (ported from autosiem.llm, keep as-is).
 _HIGH_ENTROPY = re.compile(
-    r"\b(?:sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._-]{12,})\b"
+    # sk- keys carry internal hyphens now (sk-live-..., sk-proj-...), and the
+    # original class stopped at the first one, so a live key survived redaction.
+    r"\b(?:sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._-]{12,})\b"
 )
 
 # AWS access key ID: AKIA followed by exactly 16 base-62 chars.
