@@ -262,8 +262,9 @@ class LayaDecisionProvider:
             model=str(reported.get("model") or self.config.model),
             answers=answers,
             latency_ms=elapsed_ms,
-            # Local inference costs no tokens; leaving usage empty keeps the
-            # evaluation harness from reporting a fabricated cost.
+            # Laya does report token counts, but local inference has no per-token
+            # price. The evaluation harness prices any reported usage at Jev's
+            # rate, so passing it through would invent a cost; it is dropped.
             usage={},
         )
 
