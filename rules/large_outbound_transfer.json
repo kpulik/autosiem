@@ -9,7 +9,7 @@
     "category": "network",
     "action": {"contains_any": ["exfil", "data_transfer", "upload"]},
     "raw.direction": "outbound",
-    "raw.bytes_sent": {"regex": "^[5-9][0-9]{6,}$"}
+    "raw.bytes_sent": {"regex": "^([5-9][0-9]{6}|[1-9][0-9]{7,})$"}
   },
   "mitre_attack": ["T1041"],
   "tags": ["exfiltration", "c2", "network"]
