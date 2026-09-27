@@ -233,3 +233,75 @@ def test_no_llm_configured_records_no_llm_reports() -> None:
     lines = (root / "examples" / "events.jsonl").read_text(encoding="utf-8").splitlines()
     result = AutoSIEMPipeline(load_rules(root / "rules")).process_lines(lines)
     assert result.llm_reports == set()
+
+
+class _CapturingBackend(LLMBackend):
+    def __init__(self) -> None:
+        super().__init__(LLMConfig())
+        self.prompts: list[str] = []
+
+    def chat(self, system: str, user: str) -> str:
+        self.prompts.append(user)
+        return '{"decision_type": "escalate", "confidence": 0.5, "rationale": "r"}'
+
+
+class _PastIncidentStore:
+    """Stands in for the storage the CLI/API hand to default_rag_engine (SEC-010)."""
+
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def list_incidents(self, limit: int = 100, tenant_id: str | None = None) -> list[dict]:
+        return self.rows
+
+
+_PAST_INCIDENT = {
+    "title": "Correlated activity involving user:alice and related entities",
+    "status": "closed",
+    "resolution": "true_positive",
+    "data": {
+        "summary": 'alice.smith@example.com logged in from 198.51.100.77 with password="Winter2026!"',
+        "entities": ["user:alice.smith@example.com", "ip:198.51.100.77"],
+        "mitre_attack": ["T1078", "T1110", "T1003", "T1486", "T1041"],
+    },
+}
+_PAST_SECRETS = ("alice.smith@example.com", "198.51.100.77", "Winter2026!")
+
+
+def test_rag_context_is_redacted_before_it_reaches_the_model() -> None:
+    """SEC-010: past-incident text in extra_context must be masked like the incident body."""
+    incident, findings = _load_incident()
+    service = LLMService(config=LLMConfig(backend="none"))
+    backend = _CapturingBackend()
+    service.backend = backend
+
+    service.annotate(incident, findings, extra_context=_PAST_INCIDENT["data"]["summary"])
+
+    sent = backend.prompts[0]
+    assert "REFERENCE CONTEXT" in sent
+    for secret in _PAST_SECRETS:
+        assert secret not in sent, secret
+
+
+def test_past_incidents_from_the_store_reach_the_model_redacted() -> None:
+    """The real path: CLI/API store -> default_rag_engine -> pipeline -> LLM prompt."""
+    from pathlib import Path
+
+    from autosiem.pipeline import AutoSIEMPipeline
+    from autosiem.rag import default_rag_engine
+    from autosiem.rules import load_rules
+
+    root = Path(__file__).resolve().parents[1]
+    rules = load_rules(root / "rules")
+    lines = (root / "examples" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    service = LLMService(config=LLMConfig(backend="none"))
+    backend = _CapturingBackend()
+    service.backend = backend
+    rag = default_rag_engine(store=_PastIncidentStore([_PAST_INCIDENT]))
+
+    AutoSIEMPipeline(rules, llm=service, rag=rag).process_lines(lines)
+
+    sent = backend.prompts[0]
+    assert "[past incident] Correlated activity involving user:alice" in sent
+    for secret in _PAST_SECRETS:
+        assert secret not in sent, secret
