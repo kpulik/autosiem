@@ -32,7 +32,7 @@ def test_api_rules_lists_all_rules(client: TestClient) -> None:
     response = client.get("/api/rules")
     assert response.status_code == 200
     payload = response.json()
-    assert len(payload["rules"]) == 28
+    assert len(payload["rules"]) == 29
     rule_ids = {rule["rule_id"] for rule in payload["rules"]}
     assert {"AUTO-AUTH-001", "AUTO-CRED-002", "AUTO-IMPACT-001"} <= rule_ids
     assert all(rule["enabled"] for rule in payload["rules"])
@@ -137,7 +137,7 @@ def test_rbac_mode_requires_valid_user(monkeypatch, tmp_path) -> None:
     assert client.get("/api/rules", headers={"Authorization": "Bearer wrong"}).status_code == 401
     ok = client.get("/api/rules", headers={"Authorization": "Bearer analyst-tok"})
     assert ok.status_code == 200
-    assert len(ok.json()["rules"]) == 28
+    assert len(ok.json()["rules"]) == 29
     # X-API-Key is honored too.
     assert client.get("/api/rules", headers={"X-API-Key": "analyst-tok"}).status_code == 200
     # Health stays open; the rendered UI pages do NOT (SEC-005).

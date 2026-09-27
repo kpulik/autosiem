@@ -215,10 +215,29 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
         "fires": [
             {"category": "process", "process_name": "ntdsutil.exe", "command_line": "ntdsutil \"ac i ntds\" ifm \"create full C:\\temp\" q q"},
             {"category": "process", "process_name": "esentutl.exe", "command_line": "esentutl /y ntds.dit /d C:\\temp\\ntds.dit"},
+            # The second step of the shadow-copy route: the copy out of the shadow.
+            {"category": "process", "process_name": "cmd.exe", "command_line": "cmd /c copy \\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1\\Windows\\NTDS\\ntds.dit C:\\temp\\"},
+            {"category": "process", "process_name": "diskshadow.exe", "command_line": "diskshadow /s C:\\temp\\x.dsh"},
         ],
         "silent": [
             {"category": "process", "process_name": "ntdsutil.exe", "command_line": "help"},
             {"category": "process", "process_name": "esentutl.exe", "command_line": "esentutl /mh C:\\temp\\mail.edb"},
+            # A backup job's shadow copy is not credential theft; AUTO-CRED-004 covers it at medium.
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "vssadmin create shadow /for=C:"},
+        ],
+    },
+    "AUTO-CRED-004": {
+        "fires": [
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "vssadmin create shadow /for=C:"},
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "C:\\Windows\\System32\\VSSADMIN.EXE Create Shadow /For=C:"},
+            {"category": "process", "process_name": "wmic.exe", "command_line": "wmic shadowcopy call create Volume=C:\\"},
+            {"category": "process", "process_name": "powershell.exe", "command_line": "powershell (Get-WmiObject -List Win32_ShadowCopy).Create('C:\\','ClientAccessible')"},
+        ],
+        "silent": [
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "vssadmin list shadows"},
+            # Deleting shadows is the ransomware precursor, AUTO-IMPACT-004's job.
+            {"category": "process", "process_name": "vssadmin.exe", "command_line": "vssadmin delete shadows /all /quiet"},
+            {"category": "process", "process_name": "powershell.exe", "command_line": "powershell Get-WmiObject Win32_ShadowCopy"},
         ],
     },
     "AUTO-EMAIL-001": {

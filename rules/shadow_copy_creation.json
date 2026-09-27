@@ -1,0 +1,26 @@
+// Shadow copy creation — covers MITRE ATT&CK T1003.003 (first step only)
+{
+  "id": "AUTO-CRED-004",
+  "name": "Volume shadow copy created",
+  "description": "Detects creation of a volume shadow copy with vssadmin, wmic or the Win32_ShadowCopy class. Attackers create one to read locked files such as NTDS.dit and the SAM hive, but every backup product does the same thing on a schedule, so on its own this is medium, matching SigmaHQ's 'Shadow Copies Creation Using Operating Systems Utilities'. The step that proves credential theft is the copy of ntds.dit out of the shadow, which AUTO-CRED-003 catches at critical; in a correlated incident this finding adds its risk to that chain. Allowlist the backup service account rather than disabling the rule.",
+  "severity": "medium",
+  "risk_points": 35,
+  "selection": {
+    "category": "process",
+    "command_line": {
+      "contains_any": [
+        "vssadmin create shadow",
+        "vssadmin.exe create shadow",
+        "shadowcopy call create",
+        "win32_shadowcopy).create"
+      ]
+    }
+  },
+  "mitre_attack": [
+    "T1003.003"
+  ],
+  "tags": [
+    "credential-access",
+    "endpoint"
+  ]
+}
