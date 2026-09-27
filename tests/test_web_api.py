@@ -425,3 +425,19 @@ def test_rbac_control_plane_tenant_isolation(monkeypatch, tmp_path) -> None:
     # Globex sees nothing.
     globex_sups = client.get("/api/suppressions", headers=globex).json()
     assert globex_sups == []
+
+
+def test_health_is_open_but_reveals_nothing_about_the_host(monkeypatch, tmp_path) -> None:
+    # SEC-015: /health is deliberately unauthenticated (liveness probes need it),
+    # and it used to return the absolute database and rules paths, which tell
+    # an unauthenticated caller about the host's layout and user names.
+    db = tmp_path / "private-dir" / "autosiem.db"
+    monkeypatch.setenv("AUTOSIEM_DB", str(db))
+    monkeypatch.delenv("AUTOSIEM_AUTH_INSECURE", raising=False)
+    monkeypatch.setenv("AUTOSIEM_API_TOKEN", "sekret")
+    client = TestClient(app)
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert str(tmp_path) not in response.text
+    assert "rules" not in response.text
