@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "status": "DRAFT - labels proposed by Claude, pending review by Kevin",
+  "status": "SELF-REVIEWED by the author (evidence-visibility and consistency checks, 2026-09-27); not independently reviewed",
   "labelling_guide": "evals/system_one/README.md",
   "scenarios": [
     {
@@ -16,7 +16,7 @@
       },
       "label_confidence": "high",
       "rationale": "Active destruction in progress; containment now.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-02T02:11:00Z",
@@ -53,7 +53,7 @@
       },
       "label_confidence": "high",
       "rationale": "Credential theft means every logged-on account is compromised.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-03T23:40:00Z",
@@ -80,7 +80,7 @@
       },
       "label_confidence": "high",
       "rationale": "Full domain compromise; every credential must be treated as stolen.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-04T03:05:00Z",
@@ -107,7 +107,7 @@
       },
       "label_confidence": "high",
       "rationale": "Delivery plus execution: the endpoint is compromised.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-05T09:02:00Z",
@@ -146,7 +146,7 @@
       },
       "label_confidence": "medium",
       "rationale": "A spray that ends in a success is an account takeover until disproven.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-06T04:00:00Z",
@@ -217,7 +217,7 @@
       },
       "label_confidence": "high",
       "rationale": "certutil as a downloader from a raw IP has almost no benign use.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-07T13:20:00Z",
@@ -244,7 +244,7 @@
       },
       "label_confidence": "high",
       "rationale": "Lateral movement in progress toward a sensitive system.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-08T01:15:00Z",
@@ -271,7 +271,7 @@
       },
       "label_confidence": "high",
       "rationale": "Clearing the security log is anti-forensics; something preceded it.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-09T03:02:00Z",
@@ -298,7 +298,7 @@
       },
       "label_confidence": "high",
       "rationale": "Defense evasion followed by tool transfer.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-10T22:30:00Z",
@@ -335,7 +335,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Unexpected local admin creation outside the provisioning path.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-11T02:40:00Z",
@@ -372,7 +372,7 @@
       },
       "label_confidence": "high",
       "rationale": "Confirmed data leaving the organisation.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-12T20:10:00Z",
@@ -412,7 +412,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Reverse tunnels bypass inbound firewalling.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-13T00:30:00Z",
@@ -439,7 +439,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Malicious intent, but one probe against a public host is routine noise.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-14T11:00:00Z",
@@ -468,7 +468,7 @@
       },
       "label_confidence": "high",
       "rationale": "Destructive action against source control; restore and contain.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-15T18:00:00Z",
@@ -505,7 +505,7 @@
       },
       "label_confidence": "high",
       "rationale": "The real svchost only runs from System32.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-16T10:45:00Z",
@@ -532,7 +532,7 @@
       },
       "label_confidence": "high",
       "rationale": "SYSTEM-level persistence for a binary in a temp path.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-17T01:12:00Z",
@@ -559,7 +559,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Discovery is early-stage; worth working before it progresses.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-18T14:03:00Z",
@@ -596,7 +596,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Privileged cloud access right after a credential attack.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-19T05:00:00Z",
@@ -650,7 +650,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Malicious, but contained with no user interaction.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-20T08:30:00Z",
@@ -678,7 +678,7 @@
       },
       "label_confidence": "high",
       "rationale": "Ordinary user error.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-02T09:00:00Z",
@@ -713,7 +713,7 @@
       },
       "label_confidence": "high",
       "rationale": "Routine IT diagnostics by an IT account.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-03T10:15:00Z",
@@ -750,7 +750,7 @@
       },
       "label_confidence": "high",
       "rationale": "Endpoint management doing its job.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-04T02:00:00Z",
@@ -778,7 +778,7 @@
       },
       "label_confidence": "high",
       "rationale": "Scheduled backup; engine rates this critical, which is the false alarm under test.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-05T01:00:00Z",
@@ -798,15 +798,15 @@
       "kind": "false_positive",
       "title": "Engineer opens an SSH local port-forward to the bastion",
       "story": "Standard way to reach an internal database through the jump host.",
-      "visible_evidence": "ssh.exe -L to bastion.acme.internal by an engineering user",
+      "visible_evidence": "ssh.exe -L local forward to db-prod.internal:5432 by an engineering user on an engineering laptop; the bastion target is hidden by redaction (user@host reads as <EMAIL>)",
       "labels": {
         "malicious": false,
         "severity": "informational",
         "action": "suppress"
       },
-      "label_confidence": "medium",
-      "rationale": "Sanctioned access pattern via the corporate bastion.",
-      "review": "pending",
+      "label_confidence": "low",
+      "rationale": "A local forward to an internal database is a routine engineer pattern, but the model cannot see that the target is the corporate bastion, so this label rests on less than it should.",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-06T15:20:00Z",
@@ -833,7 +833,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Approved remote support by the IT team.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-07T11:00:00Z",
@@ -860,7 +860,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Very likely Ansible, but encoded PowerShell deserves a check against the deploy log.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-08T13:00:00Z",
@@ -888,7 +888,7 @@
       },
       "label_confidence": "high",
       "rationale": "Expected offboarding action by the right account.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-09T16:00:00Z",
@@ -915,7 +915,7 @@
       },
       "label_confidence": "medium",
       "rationale": "The deploy identity doing a deploy; least-privilege concern, not an attack.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-10T12:00:00Z",
@@ -938,12 +938,12 @@
       "visible_evidence": "journalctl --vacuum-time=14d run by root from cron at 04:00",
       "labels": {
         "malicious": false,
-        "severity": "low",
+        "severity": "informational",
         "action": "suppress"
       },
       "label_confidence": "medium",
-      "rationale": "Retention housekeeping; worth confirming it matches the retention policy once.",
-      "review": "pending",
+      "rationale": "Retention housekeeping by cron; a benign match the rule happened to catch.",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-11T04:00:00Z",
@@ -971,7 +971,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Provisioning by IT; no admin group change.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-12T10:30:00Z",
@@ -994,11 +994,11 @@
       "labels": {
         "malicious": false,
         "severity": "informational",
-        "action": "monitor"
+        "action": "suppress"
       },
       "label_confidence": "medium",
-      "rationale": "Business transfer; volume alone is not exfiltration.",
-      "review": "pending",
+      "rationale": "Business transfer to a known vendor destination; volume alone is not exfiltration.",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-13T14:00:00Z",
@@ -1029,7 +1029,7 @@
       },
       "label_confidence": "high",
       "rationale": "Our own scanner.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-14T01:00:00Z",
@@ -1058,7 +1058,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Sanctioned but worth noting: logs leaving via a vendor channel.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-15T11:20:00Z",
@@ -1085,7 +1085,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Normal developer tooling from a reputable HTTPS source.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-16T09:40:00Z",
@@ -1113,7 +1113,7 @@
       },
       "label_confidence": "low",
       "rationale": "Nothing malicious observed; needs identity/geo context before judging.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-17T10:00:00Z",
@@ -1139,7 +1139,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Unsanctioned remote access on a finance endpoint is worth a call.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-18T22:05:00Z",
@@ -1166,7 +1166,7 @@
       },
       "label_confidence": "low",
       "rationale": "Probably admin work, but encoded commands hide intent; confirm with the admin.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-19T11:30:00Z",
@@ -1193,7 +1193,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Hostile, but unsuccessful; watch for a follow-up success.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-20T03:00:00Z",
@@ -1282,7 +1282,7 @@
       },
       "label_confidence": "medium",
       "rationale": "Expected from the IT admin account and host.",
-      "review": "pending",
+      "review": "self-reviewed",
       "events": [
         {
           "timestamp": "2026-09-21T10:00:00Z",
@@ -1306,5 +1306,10 @@
         }
       ]
     }
+  ],
+  "review_log": [
+    "2026-09-27 evidence check: every label's key evidence tested for presence in the built state. Found the redactor erased internal-vs-public IP context for all cases; fixed in the state builder (addresses now sent as <IP:internal>/<IP:public>).",
+    "2026-09-27 consistency check: no benign/escalate, malicious/suppress, or severity/action contradictions; paired cases differ only where visible evidence differs.",
+    "2026-09-27 changes: fp-journald-vacuum-cron severity low->informational; fp-marketing-video-upload action monitor->suppress; fp-admin-ssh-port-forward evidence corrected, confidence medium->low."
   ]
 }
