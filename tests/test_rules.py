@@ -312,13 +312,25 @@ RULE_CASES: dict[str, dict[str, list[dict[str, Any]]]] = {
         ],
     },
     "AUTO-EXFIL-001": {
+        # The threshold is ">= 5 MB". The first two cases both start with a 5-9
+        # digit, which is how a regex that only matched a leading 5-9 passed
+        # them while missing 10-49 MB, 100-499 MB and 1-4.9 GB entirely.
         "fires": [
             {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 5242880},
             {"category": "network", "action": "upload", "direction": "outbound", "bytes_sent": 9000000},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 5000000},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 10000000},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 49999999},
+            {"category": "network", "action": "upload", "direction": "outbound", "bytes_sent": 125829120},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 1500000000},
         ],
         "silent": [
             {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 1000000},
             {"category": "network", "action": "data_transfer", "direction": "inbound", "bytes_sent": 5242880},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 4999999},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 999999},
+            {"category": "network", "action": "data_transfer", "direction": "outbound", "bytes_sent": 0},
+            {"category": "network", "action": "data_transfer", "direction": "inbound", "bytes_sent": 1500000000},
         ],
     },
 }

@@ -155,6 +155,9 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                         tenant,
                     ),
                 )
+                decision = getattr(result, "decisions", {}).get(incident.incident_id)
+                if decision is not None and inserted:
+                    self._save_decision(conn, incident.incident_id, decision, tenant_id=tenant)
                 investigation = result.investigations.get(incident.incident_id)
                 if investigation and inserted:
                     self._save_investigation(conn, incident.incident_id, investigation, tenant_id=tenant)
@@ -181,6 +184,89 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                     details={"count": len(result.suppressed), "items": result.suppressed},
                     tenant_id=tenant,
                 )
+
+    def _save_decision(
+        self,
+        conn: Any,
+        incident_id: str,
+        outcome: Any,
+        tenant_id: str | None = None,
+    ) -> None:
+        """Persist a System One assessment. Advisory metadata, not authority.
+
+        An unavailable assessment is still written: "the provider was asked and
+        did not answer" is the fact an operator needs when a dashboard shows no
+        decision, and it is what the fallback-rate metric is computed from.
+        """
+        tenant = tenant_id or DEFAULT_TENANT
+        payload = outcome.to_dict() if hasattr(outcome, "to_dict") else dict(outcome)
+        answers = payload.get("answers") or {}
+
+        def _selected(name: str) -> Any:
+            answer = answers.get(name) or {}
+            return answer.get("selected")
+
+        def _confidence(name: str) -> Any:
+            answer = answers.get(name) or {}
+            return answer.get("confidence")
+
+        def _value(name: str) -> Any:
+            answer = answers.get(name) or {}
+            return answer.get("value")
+
+        severity = _selected("severity")
+        action = _selected("action")
+        self._insert(
+            conn,
+            "system_one_decisions",
+            "tenant_id,incident_id,provider,model,created_at,disposition,malicious,severity,"
+            "severity_confidence,action,action_confidence,needs_llm,latency_ms,fallback_used,"
+            "llm_escalated,data",
+            (
+                tenant,
+                incident_id,
+                str(payload.get("provider") or "none"),
+                str(payload.get("model") or ""),
+                datetime.now(timezone.utc).isoformat(),
+                str(payload.get("disposition") or "unavailable"),
+                _value("malicious"),
+                str(severity) if isinstance(severity, str) else None,
+                _confidence("severity"),
+                str(action) if isinstance(action, str) else None,
+                _confidence("action"),
+                _value("needs_llm_analysis"),
+                payload.get("latency_ms"),
+                1 if payload.get("fallback_used") else 0,
+                1 if payload.get("llm_escalated") else 0,
+                _json(payload),
+            ),
+        )
+
+    def _decision_row(self, conn: Any, incident_id: str, tenant_id: str | None) -> dict[str, Any] | None:
+        row = self._select_row(conn, "system_one_decisions", "incident_id", incident_id, tenant_id)
+        return _row_to_dict(row) if row else None
+
+    def get_decision(self, incident_id: str, tenant_id: str | None = None) -> dict[str, Any] | None:
+        """The stored System One assessment for an incident, if any."""
+        with self.connect() as conn:
+            return self._decision_row(conn, incident_id, tenant_id)
+
+    def decision_stats(self, tenant_id: str | None = None) -> dict[str, Any]:
+        """Counts for observability: per provider, fallbacks, LLM escalations."""
+        where = " where tenant_id = ?" if tenant_id else ""
+        params: tuple[Any, ...] = (tenant_id,) if tenant_id else ()
+        with self.connect() as conn:
+            rows = conn.execute(
+                "select provider, disposition, count(*) as decisions, "
+                "sum(fallback_used) as fallbacks, sum(llm_escalated) as escalations, "
+                "avg(latency_ms) as avg_latency_ms "
+                f"from system_one_decisions{where} group by provider, disposition",
+                params,
+            ).fetchall()
+        return {
+            "by_provider": [_row_to_dict(row) for row in rows],
+            "total": sum(int(_row_to_dict(row).get("decisions") or 0) for row in rows),
+        }
 
     def _save_investigation(
         self,
@@ -254,6 +340,10 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 "events": events,
                 "timeline": _build_timeline(incident_doc, findings, events),
                 "proposals": [_row_to_dict(row) for row in proposals],
+                # Advisory System One assessment, if one was recorded. Present
+                # for the CLI and the JSON API alike; None when the subsystem is
+                # off, which is the default.
+                "system_one": self._decision_row(conn, incident_id, tenant),
                 "comments": self._list_comments(conn, incident_id, tenant_id=tenant),
             }
 
@@ -904,6 +994,32 @@ class AutoSIEMStorage(RelationalStorage):
                     tenant_id text primary key,
                     state text not null,
                     updated_at text not null
+                );
+                create table if not exists system_one_decisions (
+                    -- Advisory System One assessment for one incident. Composite
+                    -- key, not a tenant_id column bolted onto incident_id: on an
+                    -- INSERT OR REPLACE path a single-column key would let one
+                    -- tenant overwrite another's row.
+                    tenant_id text not null default 'default',
+                    incident_id text not null,
+                    provider text not null,
+                    model text not null,
+                    created_at text not null,
+                    disposition text not null,
+                    malicious real,
+                    severity text,
+                    severity_confidence real,
+                    action text,
+                    action_confidence real,
+                    needs_llm real,
+                    latency_ms real,
+                    fallback_used integer not null default 0,
+                    llm_escalated integer not null default 0,
+                    -- The normalized answers only. The state that was sent is
+                    -- deliberately not stored: it is derivable from the events
+                    -- and findings already persisted.
+                    data text not null,
+                    primary key (tenant_id, incident_id)
                 );
                 create index if not exists idx_events_timestamp on events(timestamp);
                 create index if not exists idx_events_entities on events(user, host, src_ip);

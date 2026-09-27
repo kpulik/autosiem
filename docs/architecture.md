@@ -114,6 +114,7 @@ For how companies deploy AutoSIEM and get data into it (agents, agentless connec
 | `llm.py` | optional LLM adapter layer (Ollama / OpenAI-compatible) with redaction and local fallback |
 | `soc_runtime.py` | AI analyst investigation, tasks, decisions, and action proposals; `search_related_events` queries the event store through the `EventSearcher` protocol |
 | `storage.py` | SQLite persistence, rule-state overrides, and a hash-chained audit log |
+| `system_one/` | Optional typed-decision layer (Jev hosted / Laya local) that annotates incidents advisorily; never authoritative, off by default. See [`system-one.md`](system-one.md) |
 | `pipeline.py` | end-to-end processing pipeline |
 | `web/api.py` | optional FastAPI JSON API and simple HTML UI |
 | `cli.py` | `autosiem.cli:main` subcommands (demo/ingest/poll/listen/coverage/export/incidents/incident/timeline/events/findings/approve/reject/audit/audit-verify/suppressions/suppression-add/suppression-delete/incident-update/incident-comments/incident-comment/rules/rule-new/search-nl/update/metrics/users/distributed/connectors/load-intel/intel/sources) |
@@ -137,7 +138,7 @@ See `docs/deployment-and-collection.md` §"Distributed pipeline" for full config
 | `archive.py` | Append-only JSON-lines journal (`JournalFile`), `ArchiveWriter` with optional queue enqueue, `restore()` / replay from checkpoint — wired via `distributed.py` |
 | `distributed.py` | **NEW**: High-level distributed pipeline coordinator; reads `AUTOSIEM_*` env vars, orchestrates queue/archive/workers/backends; wired into CLI `ingest`/`listen` |
 | `metrics.py` | `Counter`/`Gauge`/`Histogram`, `MetricsRegistry`, Prometheus `prometheus_text` export, `ApplicationMetrics` singleton, `Span`/`Trace` timing — wired as `cli metrics` + `GET /metrics` |
-| `rbac.py` | Multi-tenant RBAC: roles `admin`/`analyst`/`ingest`/`viewer`, permission constants, JSON user store keyed by **sha256 token hashes**, `rbac_from_env()` — wired into the API token guard + CLI `users` (list/add/remove/roles); legacy `AUTOSIEM_API_TOKEN` remains the fallback when no users file is configured |
+| `rbac.py` | Multi-tenant RBAC: roles `admin`/`analyst`/`ingest`/`viewer`, permission constants, JSON user store keyed by **salted PBKDF2 token hashes** (SEC-008), `rbac_from_env()` — wired into the API token guard + CLI `users` (list/add/remove/roles); legacy `AUTOSIEM_API_TOKEN` remains the fallback when no users file is configured |
 | `redaction.py` | Per-class PII/secrets redaction (labelled secrets, AKIA/SSH keys, Luhn card numbers, SSN, IP/email/IPv6); re-exported as `autosiem.llm.Redactor` |
 | `rag.py` | `RunbookIndex` over `.md` runbooks (ATT&CK-tagged), keyword + TF-IDF-lite retrievers, `RagEngine`, `augment_prompt` — wired as RAG context in `AutoSIEMPipeline` |
 | `querygen.py` | Natural-language → canonical search DSL (`translate_query`), CLI-flag rendering (`to_cli_flags`), `QueryTranslator` — wired as CLI `search-nl` + `GET /api/search-nl` |

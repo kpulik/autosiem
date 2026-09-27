@@ -292,7 +292,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-008 | Medium | Users-file tokens: unsalted sha256, no rotation/expiry, `load()` accepts plaintext `token` | `rbac.py:hash_token` L96-98; `load` L157-181; `save` L253-271 | KDF + salt; `rotate-token`; reject plaintext `token` on load |
 | SEC-009 | Medium | ~~Audit-actor spoofing via caller `actor` param (legacy); `/ui/*` hardcode `analyst`~~ **fixed 2026-09-17** | `api.py:_actor` L99-103; L193-209, L246-271; L622/700/710 | Actor from authenticated principal only; drop/deny caller `actor` when auth off |
 | SEC-010 | Medium | LLM prompt-injection surface; RAG `extra_context` unredacted | `llm.py` L241-299, L294-298; `rag.py` L145-168 | `redact` `extra_context`; keep schema validation + deny-unknown-action policy |
-| SEC-011 | Medium | Redaction is heuristic; `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
+| SEC-011 | Medium | Redaction is heuristic (two token gaps closed 2026-09-23); `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
 | SEC-012 | Medium | No TLS in-app (by design); ~~docs/README show plain `http://` + `--reload`~~ **docs fixed 2026-09-17** | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
@@ -544,6 +544,23 @@ Two more defects surfaced here:
 Tests: `tests/test_auth_surfaces.py` (12). The 7 that assert a fix were run
 against the unfixed `api.py` and fail there; the other 5 guard properties that
 must not regress (the ingest token opens nothing else and does not bypass RBAC).
+
+### SEC-011 — two token patterns extended (2026-09-23)
+
+Found while building the System One state builder, which sends a whitelisted
+`command_line` to a remote provider and therefore depends on this redactor:
+
+- **`Authorization: Bearer <token>` leaked the token.** `_LABELLED_SECRET`
+  matched the label and consumed the single word after it (`Bearer`), which
+  masked the label but left the credential, and removed the `Bearer` anchor that
+  `_HIGH_ENTROPY` needed to catch the rest. The value pattern now takes an
+  optional `Bearer ` prefix with the token.
+- **`sk-live-…` and `sk-proj-…` keys did not match.** `sk-[A-Za-z0-9]{10,}`
+  stops at the first hyphen, so only the legacy flat `sk-` form was caught. The
+  class now allows internal hyphens and underscores.
+
+SEC-011 stays open: redaction is still heuristic, and this fixed two known
+patterns rather than the class of problem.
 
 ### SEC-006 / SEC-008 in detail — token storage (fixed 2026-09-16)
 
