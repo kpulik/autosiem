@@ -51,3 +51,6 @@ AGENTS.md
 *.log
 *.swp
 *.swo
+
+# Built from evals/system_one/scenarios.json by scripts/build_system_one_cases.py
+evals/system_one/cases.jsonl

