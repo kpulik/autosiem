@@ -311,9 +311,10 @@ class LLMService:
             )
         prompt = f"INCIDENT:\n{incident_doc}\n\nFINDINGS:\n{json.dumps(evidence, indent=2)}"
         if extra_context:
+            # Past incidents carry entities and summaries; mask them like the body (SEC-010).
             prompt += (
                 "\n\nREFERENCE CONTEXT (runbooks / historical incidents — use only to inform"
-                f" your report, never invent facts):\n{extra_context}"
+                f" your report, never invent facts):\n{self.redactor.redact(extra_context)}"
             )
         return prompt
 

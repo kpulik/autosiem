@@ -28,8 +28,8 @@ access); both are fixed.
 |---|---|
 | **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 015, 018, 019, 020, 021 |
 | **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy) |
-| **Partially fixed** | SEC-011 (two token patterns closed; redaction is still heuristic), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
-| **Open** | SEC-010 (RAG context unredacted), SEC-014 (event payloads stored as sent), SEC-016 (deep JSON, file permissions) |
+| **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-011 (two token patterns closed; redaction is still heuristic), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
+| **Open** | SEC-014 (event payloads stored as sent), SEC-016 (deep JSON, file permissions) |
 
 The detail sections below are the record of each finding and its fix.
 
@@ -166,6 +166,7 @@ surface.
 | **Location** | `llm.py:annotate`/`_build_user_prompt` (L241-299), `_fit_context` (L301-334), `mask_pii` config (L81); `rag.py:RagEngine` / `_index_incidents` (L145-168); `pipeline.py` feeds `rag.build_prompt(incident)` as `extra_context` |
 | **Description** | The incident+findings JSON is redacted before send (L267-277, L283) — good. But the **`extra_context` string is appended to the prompt with no redaction** (L294-298). Today `default_rag_engine()` indexes only the bundled static runbooks (`rag.py:32-36`), which are safe. If `RagEngine(incidents=...)` is ever used (a listed future feature is "RAG over historical incidents"), `_index_incidents` includes `inc.get('summary')` (L152), which could carry IPs/emails into the prompt unmasked unless `redact` is applied to `extra_context`. Separately, because events are attacker-controllable at ingest, prompt-injection content can flow into the analyst prompt. Blast radius is limited: LLM decisions are schema-validated + coerced (`validate_decision`, L202-218), and unknown/unsafe action names are **blocked by default** by `policy.py` (L96-97: `Unknown action … blocked by default`). |
 | **Recommendation** | (a) Keep `AUTOSIEM_LLM_MASK_PII=1` as the default and run `extra_context` through `redact` before appending. (b) Continue to treat LLM output as untrusted and never let an LLM-generated action name execute without passing the `policy.py` allow-list. |
+| **Status** | **(a) fixed 2026-09-27.** The premise above was out of date: since 2026-08-08 the CLI and API pass their storage to `default_rag_engine`, so past-incident titles, entities and summaries were already reaching the model unmasked. `_build_user_prompt` now runs `extra_context` through the same `Redactor` as the incident body. Two tests in `test_llm.py` cover the direct call and the real store -> RAG -> pipeline -> prompt path. **(b) is a standing control, not a fix:** attacker-controlled event text still reaches the prompt, and the containment is schema validation plus the deny-unknown-action policy gate. |
 | **Severity** | **Medium** |
 
 ### SEC-011 — PII/secrets redaction is heuristic and has documented gaps (Medium)
@@ -308,7 +309,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-007 | Medium | ~~Ingest token default-open; overlaps/combines with API token~~ **fixed 2026-09-17** | `api.py:_ingest_authorized` L336-343 | Fail closed when no ingest auth; document both tokens; startup surface log |
 | SEC-008 | Medium | Users-file tokens: unsalted sha256, no rotation/expiry, `load()` accepts plaintext `token` | `rbac.py:hash_token` L96-98; `load` L157-181; `save` L253-271 | KDF + salt; `rotate-token`; reject plaintext `token` on load |
 | SEC-009 | Medium | ~~Audit-actor spoofing via caller `actor` param (legacy); `/ui/*` hardcode `analyst`~~ **fixed 2026-09-17** | `api.py:_actor` L99-103; L193-209, L246-271; L622/700/710 | Actor from authenticated principal only; drop/deny caller `actor` when auth off |
-| SEC-010 | Medium | LLM prompt-injection surface; RAG `extra_context` unredacted | `llm.py` L241-299, L294-298; `rag.py` L145-168 | `redact` `extra_context`; keep schema validation + deny-unknown-action policy |
+| SEC-010 | Medium | LLM prompt-injection surface; ~~RAG `extra_context` unredacted~~ **redacted 2026-09-27** | `llm.py` L241-299, L294-298; `rag.py` L145-168 | `redact` `extra_context`; keep schema validation + deny-unknown-action policy |
 | SEC-011 | Medium | Redaction is heuristic (two token gaps closed 2026-09-23); `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
 | SEC-012 | Medium | No TLS in-app (by design); ~~docs/README show plain `http://` + `--reload`~~ **docs fixed 2026-09-17** | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
