@@ -335,6 +335,8 @@ Jev is remote, so the state is built by whitelist, not by filter:
   from an event; everything else stays local.
 - Every string passes through the existing redactor, so bearer tokens, API keys
   and private keys are masked even inside a whitelisted command line.
+- IP addresses are sent as their class only (`<IP:internal>` or `<IP:public>`),
+  never the address, because internal-versus-external is what triage needs.
 - Field names that look like credentials are never copied at all.
 - Caps on how many findings and events are included.
 

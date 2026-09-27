@@ -390,3 +390,48 @@ def test_the_question_set_is_the_documented_one() -> None:
     assert SECURITY_QUESTIONS["action"].options == (
         "suppress", "monitor", "enrich", "investigate", "escalate",
     )
+
+
+def test_the_state_keeps_whether_an_address_is_internal_but_never_the_address() -> None:
+    # The PII redactor alone turned every address into <IP>, so an office login
+    # and an attacker's login looked identical to the model. The class survives;
+    # the address does not.
+    from autosiem.schemas import Incident
+
+    incident = Incident(
+        incident_id="inc-ip",
+        title="login from 203.0.113.77 after one from 10.0.4.21",
+        severity=Severity.LOW,
+        risk_score=20,
+        entities=["ip:10.0.4.21", "ip:203.0.113.77", "ip:172.20.0.1", "ip:172.32.0.1"],
+        finding_ids=[],
+        mitre_attack=[],
+        summary="ssh root@198.51.100.9 then 127.0.0.1",
+    )
+    blob = json.dumps(build_state(incident, []))
+    for address in ("10.0.4.21", "203.0.113.77", "172.20.0.1", "172.32.0.1", "198.51.100.9", "127.0.0.1"):
+        assert address not in blob
+    entities = build_state(incident, [])["incident"]["entities"]
+    assert entities == ["ip:<IP:internal>", "ip:<IP:public>", "ip:<IP:internal>", "ip:<IP:public>"]
+    assert "<IP:public>" in blob and "<IP:internal>" in blob
+
+
+def test_documentation_ranges_count_as_public() -> None:
+    # ipaddress.is_private calls the RFC 5737 documentation ranges private;
+    # they are the conventional stand-ins for public addresses, so classifying
+    # them as internal would make every example attacker look like an insider.
+    from autosiem.system_one.questions import _ClassifyingRedactor
+    from autosiem.redaction import default_redactor
+
+    redactor = _ClassifyingRedactor(default_redactor())
+    for address in ("192.0.2.10", "198.51.100.25", "203.0.113.99"):
+        assert redactor.redact(address) == "<IP:public>"
+
+
+def test_a_malformed_address_is_still_masked() -> None:
+    from autosiem.system_one.questions import _ClassifyingRedactor
+    from autosiem.redaction import default_redactor
+
+    # Not a valid address, so it is not classified - and the underlying
+    # redactor still masks it rather than letting it through.
+    assert "999.1.1.1" not in _ClassifyingRedactor(default_redactor()).redact("seen 999.1.1.1")

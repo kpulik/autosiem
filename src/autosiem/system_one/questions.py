@@ -13,7 +13,9 @@ redactor. Jev is a remote service; Laya can run entirely on the host.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+import ipaddress
+import re
+from typing import Any, Iterable, Mapping, Protocol
 
 from ..redaction import Redactor, default_redactor
 from ..schemas import Finding, Incident
@@ -89,12 +91,58 @@ RAW_FIELD_WHITELIST = (
 _SECRET_HINTS = ("token", "secret", "password", "passwd", "credential", "api_key", "apikey", "authorization", "cookie", "session")
 
 
+#: Address ranges that mean "inside the organisation". Listed explicitly rather
+#: than using ipaddress's is_private, which also counts the RFC 5737
+#: documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) as
+#: private - and those are the conventional stand-ins for public addresses.
+_INTERNAL_NETWORKS = tuple(
+    ipaddress.ip_network(net)
+    for net in (
+        "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",  # RFC 1918
+        "100.64.0.0/10",  # carrier-grade NAT
+        "127.0.0.0/8", "169.254.0.0/16",  # loopback, link-local
+    )
+)
+_IPV4 = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+
+
+def _ip_class(match: "re.Match[str]") -> str:
+    try:
+        address = ipaddress.ip_address(match.group(0))
+    except ValueError:  # 999.1.1.1 and friends: not an address, leave it
+        return match.group(0)
+    if any(address in network for network in _INTERNAL_NETWORKS):
+        return "<IP:internal>"
+    return "<IP:public>"
+
+
+class _Redacts(Protocol):
+    def redact(self, text: str) -> str: ...
+
+
+class _ClassifyingRedactor:
+    """Replace each IPv4 address with its class, then run the real redactor.
+
+    The PII redactor turns every address into ``<IP>``, which is right for
+    privacy and wrong for triage: an office address and an attacker's address
+    become indistinguishable, and internal-versus-external source is one of the
+    most important signals there is. Sending the class keeps the signal and
+    still never sends the address.
+    """
+
+    def __init__(self, inner: _Redacts) -> None:
+        self._inner = inner
+
+    def redact(self, text: str) -> str:
+        return self._inner.redact(_IPV4.sub(_ip_class, text))
+
+
 def _looks_secret(name: str) -> bool:
     lowered = name.lower()
     return any(hint in lowered for hint in _SECRET_HINTS)
 
 
-def _clean(value: Any, redactor: Redactor) -> Any:
+def _clean(value: Any, redactor: _Redacts) -> Any:
     """Redact strings; pass numbers and bools through; drop anything else."""
     if isinstance(value, str):
         return redactor.redact(value)
@@ -138,21 +186,21 @@ def build_state(
     capped lists, and only whitelisted raw fields. ``prior_activity`` is an
     optional caller-supplied summary of earlier behaviour for these entities.
     """
-    redactor = redactor or default_redactor()
+    scrub: _Redacts = _ClassifyingRedactor(redactor or default_redactor())
     related = list(findings)[:max_findings]
     signals = _ueba_signals(related)
     signal_names = {signal["signal"] for signal in signals if signal.get("signal")}
 
     state: DecisionState = {
         "incident": {
-            "title": redactor.redact(incident.title),
-            "summary": redactor.redact(incident.summary),
+            "title": scrub.redact(incident.title),
+            "summary": scrub.redact(incident.summary),
             # The deterministic engine's own verdict. The model is being asked to
             # comment on this, so it has to see it.
             "deterministic_severity": incident.severity.name.lower(),
             "deterministic_risk_score": incident.risk_score,
             "created_at": incident.created_at.isoformat(),
-            "entities": [redactor.redact(entity) for entity in incident.entities],
+            "entities": [scrub.redact(entity) for entity in incident.entities],
             "mitre_attack": list(incident.mitre_attack),
             "finding_count": len(incident.finding_ids),
         },
@@ -177,12 +225,12 @@ def build_state(
         "findings": [
             {
                 "rule_id": finding.rule_id,
-                "rule_name": redactor.redact(finding.rule_name),
+                "rule_name": scrub.redact(finding.rule_name),
                 "severity": finding.severity.name.lower(),
                 "risk_points": finding.risk_points,
                 "mitre_attack": list(finding.mitre_attack),
                 "timestamp": finding.timestamp.isoformat(),
-                "entities": [redactor.redact(entity) for entity in finding.entities],
+                "entities": [scrub.redact(entity) for entity in finding.entities],
             }
             for finding in related
         ],
@@ -201,7 +249,7 @@ def build_state(
             for field_name in RAW_FIELD_WHITELIST:
                 if _looks_secret(field_name) or field_name not in raw:
                     continue
-                cleaned = _clean(raw[field_name], redactor)
+                cleaned = _clean(raw[field_name], scrub)
                 if cleaned is not None:
                     summary[field_name] = cleaned
         observed.append({key: value for key, value in summary.items() if value is not None})
@@ -209,6 +257,6 @@ def build_state(
         state["events"] = observed
     if prior_activity:
         state["prior_activity"] = {
-            key: _clean(value, redactor) for key, value in prior_activity.items() if _clean(value, redactor) is not None
+            key: _clean(value, scrub) for key, value in prior_activity.items() if _clean(value, scrub) is not None
         }
     return state
