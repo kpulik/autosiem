@@ -55,4 +55,13 @@ if command -v open >/dev/null 2>&1; then
   (sleep 1.5 && open "${URL}") &
 fi
 
-AUTOSIEM_DB="${DB_PATH}" PYTHONPATH=src python -m uvicorn autosiem.web.api:app --host "${HOST}" --port "${PORT}" --reload
+# --reload is a development flag: it watches the source tree and restarts the
+# server on change. Keep it to loopback; anything reachable from the network
+# should run without it, behind a TLS reverse proxy (SEC-012).
+RELOAD=()
+case "${HOST}" in
+  127.0.0.1|localhost|::1) RELOAD=(--reload) ;;
+  *) echo "Binding ${HOST}: running without --reload. Put a TLS reverse proxy in front (docs/deployment-and-collection.md)." ;;
+esac
+
+AUTOSIEM_DB="${DB_PATH}" PYTHONPATH=src python -m uvicorn autosiem.web.api:app --host "${HOST}" --port "${PORT}" ${RELOAD[@]+"${RELOAD[@]}"}

@@ -203,8 +203,13 @@ Run the optional API/UI:
 
 ```bash
 pip install -e '.[api]'
-PYTHONPATH=src uvicorn autosiem.web.api:app --reload
+PYTHONPATH=src uvicorn autosiem.web.api:app --host 127.0.0.1
 ```
+
+This binds loopback only. AutoSIEM does not terminate TLS, so anything that
+reaches it over a network must go through a TLS reverse proxy, or its bearer
+tokens travel in cleartext; see
+[Exposing the API beyond localhost](docs/deployment-and-collection.md#exposing-the-api-beyond-localhost).
 
 Then open `http://127.0.0.1:8000/` for the incident queue, `http://127.0.0.1:8000/sources` for per-source ingest health, or `http://127.0.0.1:8000/docs` for API docs.
 

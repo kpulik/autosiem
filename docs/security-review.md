@@ -288,12 +288,12 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-004 | **High** | UDP syslog/CEF listener open, spoofable, unthrottled | `listeners.py:SyslogServer._serve` L210-220; `cli.py:_run_listener` L481-508 | Source allowlist + rate limit; bounded worker pool; prefer TLS/TCP/API ingest |
 | SEC-005 | Medium | ~~Audit chain tamper-evident, not tamper-proof~~ **sealed 2026-09-17** | `storage.py:audit`; `verify_audit_chain` | ~~HMAC with a key outside the DB~~ done; external anchor later (truncation) |
 | SEC-006 | Medium | Token comparisons use `==` (timing) | `rbac.py:authenticate` L194; `api.py` L130, L339-343 | `secrets.compare_digest` everywhere |
-| SEC-007 | Medium | Ingest token default-open; overlaps/combines with API token | `api.py:_ingest_authorized` L336-343 | Fail closed when no ingest auth; document both tokens; startup surface log |
+| SEC-007 | Medium | ~~Ingest token default-open; overlaps/combines with API token~~ **fixed 2026-09-17** | `api.py:_ingest_authorized` L336-343 | Fail closed when no ingest auth; document both tokens; startup surface log |
 | SEC-008 | Medium | Users-file tokens: unsalted sha256, no rotation/expiry, `load()` accepts plaintext `token` | `rbac.py:hash_token` L96-98; `load` L157-181; `save` L253-271 | KDF + salt; `rotate-token`; reject plaintext `token` on load |
-| SEC-009 | Medium | Audit-actor spoofing via caller `actor` param (legacy); `/ui/*` hardcode `analyst` | `api.py:_actor` L99-103; L193-209, L246-271; L622/700/710 | Actor from authenticated principal only; drop/deny caller `actor` when auth off |
+| SEC-009 | Medium | ~~Audit-actor spoofing via caller `actor` param (legacy); `/ui/*` hardcode `analyst`~~ **fixed 2026-09-17** | `api.py:_actor` L99-103; L193-209, L246-271; L622/700/710 | Actor from authenticated principal only; drop/deny caller `actor` when auth off |
 | SEC-010 | Medium | LLM prompt-injection surface; RAG `extra_context` unredacted | `llm.py` L241-299, L294-298; `rag.py` L145-168 | `redact` `extra_context`; keep schema validation + deny-unknown-action policy |
 | SEC-011 | Medium | Redaction is heuristic (two token gaps closed 2026-09-23); `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
-| SEC-012 | Medium | No TLS in-app; docs/README show plain `http://` + `--reload` | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
+| SEC-012 | Medium | No TLS in-app (by design); ~~docs/README show plain `http://` + `--reload`~~ **docs fixed 2026-09-17** | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
 | SEC-015 | Low | `/health` leaks db/rules paths | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
@@ -387,6 +387,9 @@ written.**
 | SEC-008 | Medium | ✅ **Resolved** | `400b73e` shipped `rotate_token()` / `revoke_token()`. 2026-09-16 completed it: `hash_token` is salted PBKDF2-HMAC-SHA256 (`pbkdf2_sha256$<iters>$<salt>$<digest>`, written as `token_hash`), and `Rbac.load()` **refuses** a plaintext `token` field by name. Legacy `token_sha256` digests still verify so existing files keep working; `users rotate` rewrites them salted |
 | SEC-013 | Medium | ✅ **Resolved** | `400b73e` (data plane) + `f0bc677` (control plane) — see below |
 | SEC-005 (audit sealing) | Medium | ✅ **Resolved, with limits** | 2026-09-17 - rows carry an HMAC-SHA256 of their chain hash under `AUTOSIEM_AUDIT_SECRET`. Tail truncation and a stolen key remain out of scope; see "SEC-005 (audit sealing) in detail" |
+| SEC-007 | Medium | ✅ **Resolved** | 2026-09-17 - see "SEC-007 / SEC-009 / SEC-012 in detail" |
+| SEC-009 | Medium | ✅ **Resolved** | 2026-09-17 - same section |
+| SEC-012 | Medium | ✅ **Resolved (docs)** | 2026-09-17 - TLS stays a reverse-proxy responsibility by design; same section |
 
 ### SEC-013 in detail — tenancy is now enforced
 
@@ -417,10 +420,9 @@ single-tenant deployments are unaffected by either change.
 the resolution table above and "SEC-006 / SEC-008 in detail" below.
 
 ~~1. SEC-005~~ **closed 2026-09-17**, with limits; see "SEC-005 (audit sealing) in detail" below.
+~~2. SEC-009 / SEC-007 / SEC-012~~ **closed 2026-09-17**; see "SEC-007 / SEC-009 / SEC-012 in detail" below.
 
-1. **SEC-009 / SEC-007 / SEC-012** — actor-from-principal only, fail-closed ingest token, and
-   a documented TLS reverse-proxy requirement remain as originally written.
-2. **SEC-017 (the unfixed half)** — feed signing/pinning and an SSRF allow-list; the HTTPS
+1. **SEC-017 (the unfixed half)** — feed signing/pinning and an SSRF allow-list; the HTTPS
    transport rule is done.
 
 ### SEC-005 (audit sealing) in detail (fixed 2026-09-17)
@@ -482,6 +484,66 @@ unsealed and a warning is logged once per process.
   backup being restored with edits, or SQL injection.
 - **Key rotation is not supported.** A new key makes every older sealed row
   report `mac_mismatch`. Keep the key stable.
+
+### SEC-007 / SEC-009 / SEC-012 in detail (fixed 2026-09-17)
+
+**Status:** Fixed. The original write-ups predate the fail-closed middleware
+(SEC-001), so part of each was already obsolete; this records what was
+actually still true in the code.
+
+**SEC-007.** "Ingest is default-open" was no longer true: the middleware
+refuses `/api/ingest` like any other guarded path unless RBAC, the API token,
+or an explicit `AUTOSIEM_AUTH_INSECURE=1` is configured. What remained:
+
+- `_ingest_authorized` compared the ingest token with `==`. The SEC-006 sweep
+  had missed it. It now uses `secrets.compare_digest`.
+- With both tokens set, a log collector had to hold the **admin-equivalent**
+  API token as well, since the ingest token alone was never accepted. That is
+  what invited operators to reuse one value for both. Outside RBAC mode the
+  ingest token now authenticates `POST /api/ingest` on its own, and nothing
+  else. RBAC mode is unchanged: ingest still needs an `ingest`-role user, and
+  the ingest token is an extra check on top.
+- **Behaviour change to note:** an install with *only* `AUTOSIEM_INGEST_TOKEN`
+  set used to refuse everything, ingest included. It now accepts ingest with
+  that token and still refuses everything else.
+
+Found while fixing it: the shared-token check passed header strings straight
+to `secrets.compare_digest`. Starlette decodes headers as latin-1, so one
+non-ASCII byte arrived as a non-ASCII `str`, `compare_digest` raised
+`TypeError`, and the request got a **500** instead of a 401. Every token
+comparison now works on UTF-8 bytes.
+
+**SEC-009.** The `/ui/*` half was already fixed; those handlers call
+`_actor()`. The JSON API still took a caller-supplied `actor` query parameter
+and, in shared-token mode, wrote it to the audit log verbatim, so
+`POST /api/proposals/{id}/approve?actor=admin` recorded an approval by
+"admin". The parameter is gone from every endpoint. `_actor()` now takes no
+caller input: it returns the RBAC user's name, or names the credential that
+was used (`api-token`, `ingest-token`), or `unauthenticated` in insecure mode.
+Unknown query parameters are ignored, so old clients keep working and their
+`actor` value is simply not recorded.
+
+**SEC-012.** TLS stays out of the application by design: a reverse proxy
+terminates it. What was wrong was the docs. The README quick start ran
+`--reload`, and `scripts/run_dashboard.sh` passed `--reload` whatever host it
+bound. The README now binds `127.0.0.1` without `--reload`. The script keeps
+`--reload` only on loopback, and on any other host it runs without it and says
+so. The deployment guide gained "Exposing the API beyond localhost", with a
+Caddy example.
+
+Two more defects surfaced here:
+
+- The Vector example sent a header literally named `AUTOSIEM_INGEST_TOKEN`,
+  which the server never reads, so a copied config got 401 on every push. It
+  now sends `x-api-key`.
+- The first version of the script change expanded an empty array under
+  `set -u`, which is an "unbound variable" error on macOS's stock bash 3.2 and
+  would have broken every non-loopback launch. Caught by running it under
+  `/bin/bash` before committing.
+
+Tests: `tests/test_auth_surfaces.py` (12). The 7 that assert a fix were run
+against the unfixed `api.py` and fail there; the other 5 guard properties that
+must not regress (the ingest token opens nothing else and does not bypass RBAC).
 
 ### SEC-011 — two token patterns extended (2026-09-23)
 
