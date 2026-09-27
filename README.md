@@ -407,9 +407,8 @@ yet, so bring your own.
 - `docs/product-vision-ai-soc.md` — the end-state product vision
 
 Project files: [`CONTRIBUTING.md`](CONTRIBUTING.md) (setup + PR gates),
-[`SECURITY.md`](SECURITY.md) (policy + implemented controls),
-[`.env.example`](.env.example) (every environment variable), and
-[`CLAUDE.md`](CLAUDE.md) (the working state doc for AI coding sessions).
+[`SECURITY.md`](SECURITY.md) (policy + implemented controls), and
+[`.env.example`](.env.example) (every environment variable).
 
 ## Development
 
