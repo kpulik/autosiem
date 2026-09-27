@@ -12,7 +12,9 @@ transfer from an existing SQLite database occurs.
    protected process environment, never a CLI argument or committed file.
    Remote connections require `sslmode=verify-full` and a trusted CA; local
    Unix sockets and loopback connections may use local authentication.
-3. Review the packaged SQL under `src/autosiem/migrations/`. Back up an existing
+3. Review the packaged SQL under `src/autosiem/migrations/`: `001` control plane,
+   `002` event outbox, `003` tenant-scoped audit log, `004` audit sealing MAC
+   column, `005` System One decisions. Back up an existing
    target before changing it. Explicitly run `python -m autosiem.cli migrate`
    with the migration role. Applied checksums are verified; editing applied
    migrations, missing versions, and newer schemas are rejected. Failed

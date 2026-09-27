@@ -98,26 +98,33 @@ For how companies deploy AutoSIEM and get data into it (agents, agentless connec
 | `schemas.py` | `NormalizedEvent`, `DetectionRule`, `Finding`, `Incident`, `Severity`, `EventCategory`, `EntityRisk` |
 | `normalization.py` | raw JSON/syslog-ish → OCSF-inspired normalized event; `_infer_category`/`_infer_action` |
 | `listeners.py` | syslog (RFC 5424/3164) + CEF parsers and the zero-dependency UDP `SyslogServer` |
-| `connectors.py` | connector SDK (`BaseConnector` parser/poller/health), registry, and connectors: `file`, `cloudtrail`, `okta`, `github`, `entra`, `sysmon`, `zeek`, `suricata`, `asset` |
+| `connectors.py` | connector SDK (`BaseConnector` parser/poller/health), registry, and connectors: `file`, `cloudtrail`, `okta`, `github`, `entra`, `sysmon`, `zeek`, `suricata`, `asset`, plus API-native `okta-api`, `github-api`, `entra-api` and `cloudtrail-api` (S3) with persisted cursors and backoff |
+| `net.py` | `require_https`: the single transport rule every remote feed and connector goes through (SEC-017) |
+| `sigv4.py` | AWS Signature Version 4 in the standard library (no boto3), checked against botocore-generated vectors |
+| `kev.py` | CISA Known Exploited Vulnerabilities catalogue: fetched, cached beside the database, feeds the vulnerability enricher |
 | `threat_intel.py` | STIX 2.x bundle loading, indicator state file, `ThreatIntelMatcher` → `AUTO-INTEL-001` findings at pipeline time |
 | `rules.py` | JSON + Sigma-YAML rule loading with safe leading-comment stripping; `apply_rule_state()` overlays persisted enable/disable |
 | `sigma.py` | zero-dependency Sigma YAML subset parser, rule conversion, and Sigma export |
+| `sigma_sync.py` | SigmaHQ release sync (`cli sigma-sync`): imports only rules whose every field the event model populates |
 | `detection.py` | rule matching and finding creation |
 | `coverage.py` | Coverage against the full ATT&CK matrix (via `attack_matrix.py`) + the curated technique watchlist |
 | `attack_matrix.py` | Vendored ATT&CK Enterprise index (technique -> name + tactics); regenerate with `scripts/build_attack_index.py` |
 | `anomaly.py` | entity behavioral analytics (UEBA): novel-action/IP/host, off-hours, population rarity, peer-group rarity, and burst signals against a per-tenant baseline persisted in SQLite |
 | `risk.py` | entity risk aggregation + time-windowed entity-graph incident correlation |
-| `enrichment.py` | asset inventory, identity directory, network/CIDR classification and threat-intel context; criticality scales finding risk |
+| `enrichment.py` | asset inventory, identity directory, network/CIDR classification, threat-intel and KEV vulnerability context; criticality scales finding risk; **identity roles** turn an account's routine findings down to low (never hidden, never for critical rules) |
 | `suppression.py` | analyst exceptions and auto-repeat suppression for noisy detections |
 | `ai.py` | AI investigation abstraction with deterministic local fallback |
 | `policy.py` | automation/autonomy policy gates |
 | `llm.py` | optional LLM adapter layer (Ollama / OpenAI-compatible) with redaction and local fallback |
 | `soc_runtime.py` | AI analyst investigation, tasks, decisions, and action proposals; `search_related_events` queries the event store through the `EventSearcher` protocol |
-| `storage.py` | SQLite persistence, rule-state overrides, and a hash-chained audit log |
+| `storage.py` | SQLite persistence with per-tenant composite keys, rule-state overrides, and a hash-chained audit log sealed with an HMAC under `AUTOSIEM_AUDIT_SECRET` |
+| `storage_ports.py` | narrow persistence contracts (control plane, incident/event query, UEBA baseline) that SQLite and PostgreSQL both satisfy |
+| `postgres.py` | optional PostgreSQL store: checksummed forward-only migrations (`cli migrate`), tenant-keyed tables, transactional event outbox |
+| `projections.py` | outbox delivery sinks for OpenSearch and ClickHouse (`cli outbox --deliver`), idempotent per document |
 | `system_one/` | Optional typed-decision layer (Jev hosted / Laya local) that annotates incidents advisorily; never authoritative, off by default. See [`system-one.md`](system-one.md) |
 | `pipeline.py` | end-to-end processing pipeline |
 | `web/api.py` | optional FastAPI JSON API and simple HTML UI |
-| `cli.py` | `autosiem.cli:main` subcommands (demo/ingest/poll/listen/coverage/export/incidents/incident/timeline/events/findings/approve/reject/audit/audit-verify/suppressions/suppression-add/suppression-delete/incident-update/incident-comments/incident-comment/rules/rule-new/search-nl/update/metrics/users/distributed/connectors/load-intel/intel/sources) |
+| `cli.py` | `autosiem.cli:main` subcommands (demo/ingest/poll/listen/coverage/export/incidents/incident/timeline/events/findings/approve/reject/audit/audit-verify/suppressions/suppression-add/suppression-delete/incident-update/incident-comments/incident-comment/rules/rule-new/search-nl/update/sigma-sync/metrics/users/distributed/connectors/load-intel/intel/sources/decisions/evaluate-decisions/migrate/outbox) |
 
 ## Phase 3/4 building blocks
 
@@ -150,7 +157,7 @@ See `docs/deployment-and-collection.md` §"Distributed pipeline" for full config
 Storage additions in this batch:
 
 - `rule_state` table — persisted per-rule enable/disable overrides, keyed by a composite `(rule_id, tenant_id)` primary key so each tenant carries its own overrides (`set_rule_enabled`, `list_rule_states`, `rule_state_dict`); `rules.apply_rule_state()` overlays them onto loaded rules.
-- The audit log is now a **sha256 hash chain** — every `audit()` row carries `prev_hash` + `hash`; `verify_audit_chain()` returns tamper mismatches (empty = intact).
+- The audit log is a **sha256 hash chain** — every `audit()` row carries `prev_hash` + `hash`; `verify_audit_chain()` returns tamper mismatches (empty = intact). With `AUTOSIEM_AUDIT_SECRET` set, each row is also **sealed** with an HMAC of its hash (SEC-005), so a database writer who rewrites a row and recomputes the chain is caught.
 
 ## Data model
 

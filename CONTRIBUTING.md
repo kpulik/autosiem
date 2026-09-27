@@ -21,8 +21,10 @@ package to the core.
 Third-party packages are allowed only in optional extras declared in
 `pyproject.toml`:
 
-- `api` — `fastapi`, `uvicorn` (the optional web UI/API)
+- `api` — `fastapi`, `uvicorn`, `python-multipart` (the optional web UI/API)
 - `dev` — `pytest`, `httpx` (tests)
+- `postgres` — `psycopg` (the optional PostgreSQL control plane)
+- `laya` — the local Laya System One model (pulls torch; imported lazily)
 
 Optional integrations that need a real driver (Kafka via `kafka-python`) must
 degrade gracefully when the package is absent — see `KafkaBus` in `bus.py` for
@@ -73,7 +75,13 @@ every rule in `rules/` has at least one positive and one negative case.
 
 1. Add `rules/<name>.json` (or a Sigma `.yaml`). See `docs/tutorial.md` §6 for
    the schema and `rules/failed_login.json` for a minimal example.
-2. Add positive + negative cases to `tests/test_rules.py`.
+2. Add positive + negative cases to `tests/test_rules.py`. If the rule has a
+   numeric threshold, remember there is no numeric operator: a `regex` threshold
+   needs cases on both sides of every power-of-ten boundary (AUTO-EXFIL-001's
+   `^[5-9][0-9]{6,}$` silently missed 10-49 MB for this reason).
+   Adding a rule also breaks five hardcoded rule counts, in `tests/test_cli.py`
+   (x2), `tests/test_sigma_export.py` and `tests/test_web_api.py` (x2). That is
+   deliberate; update them.
 3. Run `PYTHONPATH=src python3 -m autosiem.cli coverage --rules rules` and
    confirm the technique count moved as you expect. Check
    `matrix.unknown_technique_ids` is empty — a technique ID MITRE does not
@@ -88,7 +96,10 @@ Available selection operators are defined by `_match_operator` in
 `contains_all`, `startswith`, `endswith`, their `*_any`/`*_all` variants,
 `regex`, `in`, `not_in`, `not_equals`, `exists`, and their exact negative
 string variants. Recursive `any_of`, `all_of`, and `not` nodes represent
-Boolean conditions. Numeric comparison is not implemented.
+Boolean conditions. Numeric comparison is not implemented. Keep selections
+flat (one dict of fields, or a single `regex`) if the rule should survive
+`cli export`: nested `any_of`/`all_of`/`not` trees evaluate correctly but do not
+round-trip to Sigma, and `tests/test_sigma_export.py` gates on it.
 
 ## Adding a connector
 

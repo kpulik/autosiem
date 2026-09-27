@@ -25,7 +25,9 @@ This repository currently contains a Python MVP core rather than a full distribu
 - **Risk scoring & triage** — entity risk aggregation and a full triage workflow (status, assignee, resolution, comment thread).
 - **AI SOC analyst runtime** — a deterministic local investigator (or your own LLM) that investigates and proposes actions; high-impact actions always require human approval. Its related-event task really queries the event store, answering "what else has this user/host/IP done?" and attaching the prior activity as evidence.
 - **Suppressions & exceptions** — analyst-defined exceptions and auto-repeat suppression for noisy detections, applied at ingest and fully audited.
-- **Ingest surface** — JSONL CLI + HTTP endpoint, syslog (RFC 5424/3164) + CEF UDP listeners, a connector SDK (file, CloudTrail, Okta file **and API-native**, Entra ID, GitHub, Sysmon, Zeek, Suricata, asset inventory), and STIX/TAXII threat-intel matching.
+- **Ingest surface** — JSONL CLI + HTTP endpoint, syslog (RFC 5424/3164) + CEF UDP listeners, a connector SDK (file-based CloudTrail, Okta, Entra ID and GitHub exports, plus **API-native** `okta-api`, `github-api`, `entra-api` and `cloudtrail-api` over S3; Sysmon, Zeek, Suricata, asset inventory), and STIX/TAXII threat-intel matching.
+- **Security controls** — fail-closed API and UI auth, multi-tenant RBAC with salted PBKDF2 token hashes, a write-only ingest token for collectors, CSRF on UI forms, and a hash-chained audit log sealed with an HMAC key held outside the database (`AUTOSIEM_AUDIT_SECRET`). See [`SECURITY.md`](SECURITY.md).
+- **Optional PostgreSQL control plane** — a shared store with forward-only checksummed migrations and a transactional event outbox for OpenSearch/ClickHouse projection; SQLite stays the default. Implemented, not HA-certified: see [`docs/postgresql.md`](docs/postgresql.md).
 - **Zero runtime dependencies** — the entire core uses only the Python standard library.
 
 ## Quick start
@@ -226,7 +228,7 @@ Optional: set `AUTOSIEM_INGEST_TOKEN` when starting the server and every ingest 
 
 ## Detection coverage
 
-The bundled `rules/` set (16 rules mapping to 20 techniques) exercises a full attack kill-chain on the demo `alice` profile — phishing → valid-account auth → brute force → encoded PowerShell → download cradle → system recon → masquerading → credential dumping → lateral movement → web exploit → encrypted C2 tunnel → data exfiltration → log clearing → ransomware → cloud admin takeover — producing a critical (risk 1000) incident that the AI runtime proposes containment for.
+The bundled `rules/` set (29 curated rules mapping to 34 techniques, 4.9% of the ATT&CK 19.2 Enterprise matrix; `cli sigma-sync` adds community rules on top) exercises a full attack kill-chain on the demo `alice` profile — phishing → valid-account auth → brute force → encoded PowerShell → download cradle → system recon → masquerading → credential dumping → lateral movement → web exploit → encrypted C2 tunnel → data exfiltration → log clearing → ransomware → cloud admin takeover — producing a critical (risk 1000) incident that the AI runtime proposes containment for.
 
 Run `PYTHONPATH=src python -m autosiem.cli coverage --rules rules` to see the current technique coverage and the remaining gap list. The rule-by-technique table is in `docs/tutorial.md` (§6).
 
@@ -412,7 +414,7 @@ Project files: [`CONTRIBUTING.md`](CONTRIBUTING.md) (setup + PR gates),
 ## Development
 
 - Keep the suite green after every change: `PYTHONPATH=src python3 -m pytest tests/ -q`.
-- **Zero runtime dependencies.** The core (`src/autosiem/*`) imports nothing beyond the standard library — the Sigma YAML parser is a deliberate subset, do not add PyYAML. Extra deps live only in optional extras (`api`, `dev` in `pyproject.toml`).
+- **Zero runtime dependencies.** The core (`src/autosiem/*`) imports nothing beyond the standard library — the Sigma YAML parser is a deliberate subset, do not add PyYAML. Extra deps live only in optional extras (`api`, `dev`, `postgres`, `laya` in `pyproject.toml`).
 - `rules/*.json` may start with `//` or `#` comment lines (the loader strips them). Editor JSON "linter errors" on those files are expected — don't quote the comments.
 - **New rules must ship tested**: add positive + negative cases to `tests/test_rules.py` or the suite fails.
 - Editor diagnostics are clean (0 errors / 0 warnings); `pyrightconfig.json` sets a pragmatic `basic` type-checking mode.
