@@ -1,17 +1,15 @@
 # AutoSIEM roadmap
 
-## Current status (2026-08-22)
+## Current status (2026-09-27)
 
-- **746 tests, all pass** (`PYTHONPATH=src python3 -m pytest tests/ -q`); `pyright` clean (0 errors / 0 warnings).
-- **UEBA + incident correlation deepened (2026-08-08)**: `anomaly.py` now scores seven named behavioral signals (novel action / source IP / host, off-hours, population rarity, peer-group rarity, burst) against a per-tenant baseline persisted in SQLite, with warm-up gating and a per-signal explanation on every finding; `risk.py` correlates findings through a 24h-windowed entity graph so one incident spans user ↔ host ↔ IP ↔ cloud account and carries a time-ordered kill chain.
-- **16 detection rules** covering **20 MITRE ATT&CK techniques**. Measured against MITRE's published matrix (ATT&CK **19.2**, vendored as a distilled index): **20/697 techniques (2.9%)** and **15/222 parent techniques (6.8%)**, with a per-tactic breakdown and zero technique IDs that MITRE no longer publishes. The separate 15-technique curated watchlist is fully covered. The small percentage is the honest one — this is a demonstration rule set, not a production content library.
-- Demo `examples/events.jsonl` (15 events) runs a full kill-chain on profile `alice` → one critical incident (risk 1000) for which the AI runtime proposes containment (never auto-executes).
-- Sigma YAML import/export round-trip rules losslessly; the per-rule test harness + CI (suite + coverage smoke + pyright on Py 3.10/3.12) are live on the public repo `kpulik/autosiem`.
-- Phase 2 ingest surface shipped: syslog/CEF UDP listeners, 9 connectors (file/cloudtrail/okta/github/entra/sysmon/zeek/suricata/asset), per-source health, STIX/TAXII threat-intel ingestion.
-- **Phase 4 copilot + the audit-chain/metrics parts of Phase 3 are now WIRED**, **multi-tenant RBAC is implemented + wired** (`src/autosiem/rbac.py`, CLI `users`, RBAC token guard in the API), and **the Phase-3 distributed pipeline is wired** (`src/autosiem/distributed.py` — durable queue, workers, archive, ClickHouse/OpenSearch backends, all opt-in via `AUTOSIEM_*` env vars on `cli ingest`/`listen`). A first-alpha security review + High hardening (SEC-001..SEC-004) completed now lives in `docs/security-review.md`.
-- **RBAC depth is now shipped**: per-tenant row isolation on the data plane (`tenant_id` on events/findings/incidents/investigations/action_proposals), token rotation + revocation (CLI `users rotate|revoke`, `POST /api/users/{name}/rotate-token|revoke-token`), and a full user-management audit trail written into the hash-chained audit log.
-- **Control-plane tenancy is now shipped**: `rule_state` and `suppressions` are tenant-scoped too, so one tenant's analyst disabling a rule or adding a suppression no longer affects every other tenant.
-- **Optional PostgreSQL control plane implemented**: [ADR-0001](adr/0001-postgres-control-plane.md) now has explicit migrations, transactional event outbox, concurrent case-write tests, and tenant-safe keys. SQLite remains the local default. [Deployment limits](postgresql.md) distinguish tested control-plane concurrency from still-unimplemented HA ingestion and external archive recovery.
+- **1174 tests pass** without PostgreSQL (19 skipped, 2 provider-integration tests deselected by default); CI also runs the full suite against PostgreSQL 16. `pyright` clean.
+- **29 curated detection rules** covering **34 ATT&CK techniques**: **34/697 (4.9%)** of the ATT&CK 19.2 Enterprise matrix and **28/222 parents (12.6%)**. `cli sigma-sync` adds SigmaHQ rules on top. The 15-technique curated watchlist is at zero gaps, which is a much narrower claim than matrix coverage.
+- Demo `examples/events.jsonl` (15 events) runs a full kill chain on profile `alice` into one critical incident (risk 1000); the AI runtime proposes containment and never auto-executes it.
+- **All four log sources are API-native**: `okta-api`, `github-api`, `entra-api`, `cloudtrail-api` (S3 with hand-rolled SigV4), each with persisted cursors and throttling backoff; the file-based connectors remain for offline use.
+- **Security review**: every High finding and most Mediums are closed, including audit sealing (SEC-005), salted token hashes (SEC-006/008), a scoped ingest token and an un-forgeable audit actor (SEC-007/009), and tenant isolation (SEC-019/020/021). See the status table in [`security-review.md`](security-review.md).
+- **Optional PostgreSQL control plane** implemented with forward-only migrations (001-005) and a transactional outbox; not HA-certified. See [`postgresql.md`](postgresql.md).
+- **System One decision layer** (optional, advisory, off by default) with a 39-case labelled benchmark in `evals/system_one/`. The open-weight Laya model does not discriminate on it; see [`system-one.md`](system-one.md).
+- **Identity roles** turn an account's routine findings down to low severity without hiding them.
 
 ## Phase 0 — MVP core
 

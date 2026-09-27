@@ -169,3 +169,11 @@ The copilot-facing modules are implemented, unit-tested, and **wired into the CL
 - **Redaction** now lives in its own module: `autosiem.redaction` deepens per-class policy (labelled secrets, AKIA/SSH keys, Luhn-checked card numbers, SSN, IP/email/IPv6). `llm.py` re-exports `Redactor`, so `autosiem.llm.Redactor` still works unchanged.
 
 All wiring was completed in commit `0d3f5c8` (Phase 3/4 wiring) and confirmed in `033d92d` (docs refresh).
+
+## Related: the System One decision layer
+
+Separate from the generative LLM path described here, AutoSIEM can ask a fast
+typed-decision model four questions about each incident (malicious, severity,
+action, and whether it needs a narrative write-up). It is advisory only, never
+changes severity or a policy gate, and is off by default. See
+[`system-one.md`](system-one.md).

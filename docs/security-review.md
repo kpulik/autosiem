@@ -17,6 +17,22 @@ forwarders.
 
 ---
 
+
+## Status at a glance (2026-09-27)
+
+The original review below found 17 issues; later work added SEC-018 to SEC-021.
+Note that two findings share the number SEC-005 (audit sealing, and UI read
+access); both are fixed.
+
+| Status | Findings |
+|---|---|
+| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 018, 019, 020, 021 |
+| **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy) |
+| **Partially fixed** | SEC-011 (two token patterns closed; redaction is still heuristic), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
+| **Open** | SEC-010 (RAG context unredacted), SEC-014 (event payloads stored as sent), SEC-015 (`/health` leaks paths), SEC-016 (deep JSON, file permissions) |
+
+The detail sections below are the record of each finding and its fix.
+
 ## 1. Scope & model
 
 The MVP is a **single-node workstation SOC SIEM**. The threat model implied by the code and
@@ -53,7 +69,7 @@ surface.
 |---|---|---|---|
 | **SQLite DB** (`data/autosiem.db`, `AUTOSIEM_DB`) | Events (incl. raw evidence), findings, incidents, investigations, proposals, comments, `rule_state`, `audit_log` | High (PII in event `data` and incident summaries) | Any process with the path; an unconfigured API/UI |
 | **Detection rules dir** (`rules/`, `AUTOSIEM_RULES`) | Static rule JSON + persisted enable/disable in `rule_state` | High (can disable all detections) | `ui/rules/{id}/toggle` open; `api/rules` permission-gated |
-| **RBAC users file** (`data/rbac_users.json`, `AUTOSIEM_RBAC_FILE`) | `User` records + sha256 token hashes | High (the privilege boundary itself) | Local filesystem; written by `cli users` / `RBAC.save()` |
+| **RBAC users file** (`data/rbac_users.json`, `AUTOSIEM_RBAC_FILE`) | `User` records + salted PBKDF2 token hashes (sha256 before SEC-008) | High (the privilege boundary itself) | Local filesystem; written by `cli users` / `RBAC.save()` |
 | **Threat-intel STIX state** (`<db>.intel.json`) | Indicators matched at ingest | Medium (content integrity) | Local filesystem; `load-intel` / `update` |
 | **LLM outbound network** | `AUTOSIEM_LLM_URL` + `AUTOSIEM_LLM_API_KEY` | Medium (PII can leave the host) | Only when an LLM backend is configured |
 | **Audit log** (`audit_log` table) | Tamper-evident hash chain | High | Any actor on the DB / API write paths |
