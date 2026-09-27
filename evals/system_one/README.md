@@ -3,10 +3,11 @@
 A labelled set of security incidents for `cli evaluate-decisions`, so the
 deterministic AutoSIEM path, Jev and Laya can be compared on the same cases.
 
-> **Status: DRAFT.** 39 scenarios written and labelled by Claude on 2026-09-27,
-> pending human review. Until a person has reviewed the labels, any score
-> computed against them measures agreement with Claude's judgement, not
-> accuracy.
+> **Status: SELF-REVIEWED, not independently reviewed.** 39 scenarios written and
+> labelled by Claude on 2026-09-27, then checked for evidence visibility and
+> consistency (see `review_log` in `scenarios.json`). The author reviewing their
+> own labels is not an independent check: scores against this set measure
+> agreement with one careful labeller, not ground truth.
 
 ## Files
 
@@ -114,15 +115,41 @@ Actions: escalate 9, investigate 9, monitor 5, suppress 13, enrich 3.
 - **Synthetic.** Real incidents are messier. This set is a way to start, and
   the format is simple so real, redacted incidents can be added the same way.
 
-## First baseline (against the draft labels)
+## Results (2026-09-27, self-reviewed labels)
 
-The deterministic path, on 2026-09-27, before review:
+| Path | malicious acc | Brier | ECE | severity acc | action acc | latency |
+|---|---|---|---|---|---|---|
+| deterministic AutoSIEM | 61.5% | 0.321 | 0.306 | 38.5% | 33.3% | ~0 ms |
+| Laya `laya-typed-decisions` 0.3.20 | 53.8% | 0.250 | 0.083 | 28.2% | 17.9% | 494 ms mean, 766 ms p95 |
+| Jev | not run (no key; paid API) | | | | | |
 
-| Question | Accuracy | Other |
-|---|---|---|
-| malicious | 61.5% | Brier 0.32 (worse than the 0.25 of always answering 0.5) |
-| severity | 38.5% | |
-| action | 33.3% | recommends `investigate` for 11 of 13 `suppress` cases |
+Laya ran locally on an Apple M4 Pro (MPS), four questions per call, about 2,100
+input tokens per case.
 
-Recorded to show the harness working and the size of the gap a model would have
-to close. Not a result until the labels are reviewed.
+**Reading it:**
+
+- **Laya does not discriminate on this set.** Its P(malicious) averaged 0.588 on
+  real attacks and 0.585 on benign cases, and it called all 39 malicious. It never
+  chose informational or low severity, and never suppress, monitor or enrich.
+- **Its good calibration numbers are hollow.** A Brier of 0.250 is exactly what
+  always answering 0.5 scores, and a low ECE is easy when every answer sits near
+  0.59 and about half are right.
+- **Its confidence never exceeded 0.07.** Under AutoSIEM's default thresholds
+  (accept 0.75, review 0.5) every Laya answer would be recorded and ignored. The
+  engine's design held: a useless signal was kept out of the pipeline.
+- **The deterministic path is not good either.** Its malicious Brier (0.32) is
+  worse than a coin flip, because a risk score is not a probability, and it asks
+  for investigation on 11 of the 13 cases labelled suppress. That is the gap a
+  typed-decision model would need to close.
+- Consistent with Laya's published caveat: this checkpoint was trained for agent
+  observability and invoice processing, and its zero-shot base scored below the
+  majority-class baseline on its own benchmark. Security triage is out of domain.
+
+**Input-format check (scratch experiment, not product code):** sending the same
+cases as a plain-English summary instead of JSON moved Laya's malicious accuracy
+to 66.7%, but P(malicious) still averaged 0.560 on attacks and 0.531 on benign.
+The 66.7% vs 61.5% difference is two cases on a 39-case set, which is noise.
+
+**What this does not show:** that Laya is useless in general, or that a model
+fine-tuned on security incidents would do this badly. It shows that this
+checkpoint, zero-shot on these questions, adds nothing here.
