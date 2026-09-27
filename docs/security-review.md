@@ -26,10 +26,10 @@ access); both are fixed.
 
 | Status | Findings |
 |---|---|
-| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 018, 019, 020, 021 |
+| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 015, 018, 019, 020, 021 |
 | **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy) |
 | **Partially fixed** | SEC-011 (two token patterns closed; redaction is still heuristic), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
-| **Open** | SEC-010 (RAG context unredacted), SEC-014 (event payloads stored as sent), SEC-015 (`/health` leaks paths), SEC-016 (deep JSON, file permissions) |
+| **Open** | SEC-010 (RAG context unredacted), SEC-014 (event payloads stored as sent), SEC-016 (deep JSON, file permissions) |
 
 The detail sections below are the record of each finding and its fix.
 
@@ -211,6 +211,7 @@ surface.
 | **Location** | `api.py:health` (L135-137); `/metrics` (L440-445) |
 | **Description** | `/health` is deliberately open and returns `_env_db_path()` and `_env_rule_path()` on the wire, leaking absolute DB/rules paths to any caller. Minor, but a nice-to-fix. `/metrics` returns only observed counts — fine to leave open. |
 | **Recommendation** | Return status only (`{"status":"ok"}`), or strip paths from the public health response. |
+| **Status** | **Fixed 2026-09-27.** `/health` returns `{"status": "ok"}` and nothing else; a test asserts the database path is absent from the body while the endpoint stays open under a fail-closed token config. |
 | **Severity** | **Low** |
 
 ### SEC-016 — Deep/oversized JSON and plaintext-at-rest can 500 or memory-spike (Low)
@@ -312,7 +313,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-012 | Medium | No TLS in-app (by design); ~~docs/README show plain `http://` + `--reload`~~ **docs fixed 2026-09-17** | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
-| SEC-015 | Low | `/health` leaks db/rules paths | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
+| SEC-015 | Low | ~~`/health` leaks db/rules paths~~ **fixed 2026-09-27** | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
 | SEC-016 | Low | Deep/oversized JSON → 500/memory; plaintext at rest + umask perms | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
 | SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**, extended to both API connectors **2026-09-14**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py`; `connectors.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
 | Verified clean | — | Search DSL → parameterized SQL (no injection) | `storage.py` L321-393 | Keep `?`-only binding; review rule for future SQL |

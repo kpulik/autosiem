@@ -335,7 +335,13 @@ def _misconfigured(request: Request) -> Any:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "db": str(_env_db_path()), "rules": str(_env_rule_path())}
+    """Liveness only. Deliberately unauthenticated, so it says nothing else.
+
+    It used to return the absolute database and rules paths, which told any
+    caller about the host's directory layout (SEC-015). Operators who need the
+    paths have the CLI and their own configuration.
+    """
+    return {"status": "ok"}
 
 
 @app.get("/api/incidents")
