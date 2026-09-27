@@ -43,6 +43,49 @@ CRITICALITY_MULTIPLIERS: dict[str, float] = {
 MAX_RISK_MULTIPLIER = 2.0
 
 
+# --- identity roles --------------------------------------------------------
+# An identity record may declare a ``role``: what kind of account it is. A role
+# names the specific rules whose matches are the account's normal job, so a
+# backup service account creating a shadow copy, or the CI deploy identity
+# assuming the admin role, stops arriving at full severity.
+#
+# A role only ever turns a finding DOWN. The finding is kept, its severity is
+# capped at low, its risk is scaled by ROUTINE_RISK_MULTIPLIER, and it records
+# why. Anything the account does that is not on its list still scores in full
+# and still correlates, so a compromised service account doing something
+# unexpected escalates exactly as before.
+ROLE_PROFILES: dict[str, frozenset[str]] = {
+    # Nightly backups create volume shadow copies.
+    "backup": frozenset({"AUTO-CRED-004"}),
+    # SCCM, Ansible, Puppet and friends register tasks and run encoded
+    # PowerShell (Ansible's WinRM modules send every script as -EncodedCommand).
+    "config-management": frozenset({"AUTO-PERSIST-001", "AUTO-EXEC-001", "SIG-EXEC-001", "AUTO-EXEC-002"}),
+    # The deploy pipeline assumes the admin role to apply infrastructure.
+    "ci-deploy": frozenset({"AUTO-CLOUD-001"}),
+    # A vulnerability scanner sends attack payloads and enumerates on purpose.
+    "vuln-scanner": frozenset({"AUTO-WEB-001", "AUTO-DISCO-001", "AUTO-DISCO-002", "AUTO-DISCO-003"}),
+    # Helpdesk and sysadmins inventory, create accounts and run remote support.
+    "it-admin": frozenset({"AUTO-DISCO-001", "AUTO-DISCO-002", "AUTO-DISCO-003", "AUTO-C2-002", "AUTO-PERSIST-002"}),
+    # Source-control org admins remove members during offboarding.
+    "scm-admin": frozenset({"AUTO-IMPACT-003"}),
+}
+
+#: Rules no role may ever downgrade, whatever a record's ``expected_rules``
+#: says. These are the ones whose benign use is too rare, or whose misuse is too
+#: costly, to wave through on an account label: disabling defences, clearing
+#: logs, data leaving the network, threat-intel hits and behavioural anomalies.
+NEVER_ROUTINE: frozenset[str] = frozenset({
+    "AUTO-DEFEV-002",
+    "AUTO-DEFEV-004",
+    "AUTO-EXFIL-001",
+    "AUTO-INTEL-001",
+    "builtin-anomaly-baseline",
+})
+
+#: Risk kept by a finding that is routine for its account's role.
+ROUTINE_RISK_MULTIPLIER = 0.25
+
+
 def normalize_criticality(value: Any) -> str | None:
     """Coerce assorted spellings onto the four supported levels."""
     if value is None:
@@ -280,6 +323,28 @@ class IdentityEnricher:
     def __len__(self) -> int:
         return len(self._by_user)
 
+    def routine_rules(self, user: str) -> tuple[str | None, frozenset[str]]:
+        """The account's role and the rules that are routine for it.
+
+        Returns ``(None, frozenset())`` for unknown users, disabled accounts
+        (activity on one is never routine) and unrecognised roles, so a typo in
+        the identity file downgrades nothing rather than something unintended.
+        """
+        record = self._by_user.get(user.strip().lower())
+        if record is None:
+            return None, frozenset()
+        status = str(_first(record, "status", "account_status") or "").strip().lower()
+        if status in {"disabled", "inactive", "terminated", "suspended"}:
+            return None, frozenset()
+        role = str(record.get("role") or "").strip().lower() or None
+        rules = set(ROLE_PROFILES.get(role, frozenset())) if role else set()
+        extra = record.get("expected_rules") or []
+        if isinstance(extra, (list, tuple)):
+            rules.update(str(rule) for rule in extra if str(rule))
+        if role is not None and role not in ROLE_PROFILES and not extra:
+            return role, frozenset()
+        return role, frozenset(rules - NEVER_ROUTINE)
+
     def enrich(self, entity: str) -> EntityContext | None:
         kind, value = split_entity(entity)
         if kind != "user":
@@ -302,6 +367,7 @@ class IdentityEnricher:
             "manager": record.get("manager"),
             "privileged": privileged,
             "status": status or None,
+            "role": str(record.get("role")).strip().lower() if record.get("role") else None,
         }
         tags = [str(tag) for tag in (record.get("tags") or []) if str(tag)]
         if privileged:
@@ -586,6 +652,27 @@ class EnrichmentRegistry:
                 if tag not in tags:
                     tags.append(tag)
         return tags
+
+    def routine_match(self, rule_id: str, severity: Any, entities: Iterable[str]) -> dict[str, str] | None:
+        """If this finding is routine for the role of a user in it, say whose.
+
+        Never for a critical finding and never for a NEVER_ROUTINE rule: a role
+        label must not be able to quiet credential theft or ransomware.
+        """
+        if rule_id in NEVER_ROUTINE or getattr(severity, "name", str(severity)).upper() == "CRITICAL":
+            return None
+        identities = [e for e in self.enrichers if isinstance(e, IdentityEnricher)]
+        if not identities:
+            return None
+        for entity in entities:
+            kind, value = split_entity(entity)
+            if kind != "user":
+                continue
+            for identity in identities:
+                role, rules = identity.routine_rules(value)
+                if rule_id in rules:
+                    return {"entity": entity, "role": role or "custom", "rule_id": rule_id}
+        return None
 
     def risk_multiplier(self, entities: Iterable[str]) -> float:
         """Multiplier for a finding touching ``entities``.

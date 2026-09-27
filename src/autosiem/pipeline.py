@@ -9,7 +9,7 @@ from uuid import uuid4
 from .ai import Investigator
 from .anomaly import AnomalyDetector, BaselineState, BaselineStore
 from .detection import evaluate_rules
-from .enrichment import EnrichmentRegistry
+from .enrichment import ROUTINE_RISK_MULTIPLIER, EnrichmentRegistry
 from .feedback import FeedbackEngine
 from .llm import LLMService
 from .normalization import normalize, parse_raw_line
@@ -17,7 +17,7 @@ from .policy import base_technique, classify_target
 from .rag import RagEngine
 from .risk import build_incidents
 from .rules import load_rules
-from .schemas import DetectionRule, Finding, Incident, NormalizedEvent
+from .schemas import DetectionRule, Finding, Incident, NormalizedEvent, Severity
 from .soar import SoarPlanner
 from .soc_runtime import AIAnalystRuntime, ActionProposal, EventSearcher, Investigation
 from .suppression import SuppressionEngine
@@ -146,6 +146,22 @@ class AutoSIEMPipeline:
             # built, so the same detection on a crown-jewel host outranks it on
             # a spare laptop. Unenriched entities score exactly as before.
             for finding in result.findings:
+                # A finding that is the account's normal job (its identity
+                # role) is turned down, never dropped, and then skips the
+                # criticality multiplier: a privileged backup account doing its
+                # backup should not be doubled back up.
+                routine = self.enrichment.routine_match(finding.rule_id, finding.severity, finding.entities)
+                if routine is not None:
+                    finding.evidence["expected_activity"] = {
+                        **routine,
+                        "original_severity": finding.severity.name.lower(),
+                        "original_risk_points": finding.risk_points,
+                    }
+                    if finding.severity > Severity.LOW:
+                        finding.severity = Severity.LOW
+                    if finding.risk_points > 0:
+                        finding.risk_points = max(1, round(finding.risk_points * ROUTINE_RISK_MULTIPLIER))
+                    continue
                 adjusted = self.enrichment.adjusted_risk(finding.risk_points, finding.entities)
                 if adjusted != finding.risk_points:
                     finding.risk_points = adjusted
