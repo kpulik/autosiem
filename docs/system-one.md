@@ -127,7 +127,12 @@ For the hosted provider, the state is a **whitelist**:
 - Only the named fields in `RAW_FIELD_WHITELIST` are copied from an event.
 - Any field name containing `token`, `secret`, `password`, `credential`,
   `api_key`, `authorization`, `cookie` or `session` is never copied.
-- Every string is passed through `autosiem.redaction`.
+- Every string is passed through `autosiem.redaction`. IPv4 addresses are first
+  replaced by their **class**, `<IP:internal>` (RFC 1918, carrier-grade NAT,
+  loopback, link-local) or `<IP:public>`, so the address never leaves but the
+  single most useful fact about it does. Redaction alone turned every address into
+  `<IP>`, which made an office login and an attacker's login indistinguishable.
+  The RFC 5737 documentation ranges count as public, deliberately.
 - `AUTOSIEM_DECISION_MAX_FINDINGS` / `MAX_EVENTS` cap the size.
 
 Building this found two real gaps in the shared redactor, both now fixed:
