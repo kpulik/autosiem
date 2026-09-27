@@ -115,29 +115,39 @@ Actions: escalate 9, investigate 9, monitor 5, suppress 13, enrich 3.
 - **Synthetic.** Real incidents are messier. This set is a way to start, and
   the format is simple so real, redacted incidents can be added the same way.
 
-## Results (2026-09-27, self-reviewed labels)
+## Results (2026-09-27, self-reviewed labels, measured on `main` at `a87d806`)
 
 | Path | malicious acc | Brier | ECE | severity acc | action acc | latency |
 |---|---|---|---|---|---|---|
-| deterministic AutoSIEM | 61.5% | 0.321 | 0.306 | 38.5% | 33.3% | ~0 ms |
-| Laya `laya-typed-decisions` 0.3.20 | 53.8% | 0.250 | 0.083 | 28.2% | 17.9% | 494 ms mean, 766 ms p95 |
-| Jev | not run (no key; paid API) | | | | | |
+| deterministic AutoSIEM | 64.1% | 0.300 | 0.282 | 38.5% | 33.3% | ~0 ms |
+| deterministic + identity roles* | 71.8% | 0.236 | | 41.0% | 33.3% | ~0 ms |
+| Laya `laya-typed-decisions` 0.3.20 | 53.8% | 0.250 | 0.063 | 28.2% | 17.9% | 710 ms mean, 1106 ms p95 |
+| Jev | not run: paid API, declined | | | | | |
+
+\* With the roles an operator would assign to the set's service and admin
+accounts (backup, config-management, ci-deploy, vuln-scanner, it-admin,
+scm-admin). This shows identity roles (#19) working when configured, not a
+generic improvement: 10 benign cases turned down, no real attack touched.
 
 Laya ran locally on an Apple M4 Pro (MPS), four questions per call, about 2,100
-input tokens per case.
+input tokens per case. Latency varies with machine load (an earlier run on the
+same machine measured 494 ms mean).
+
+Earlier in the day, before #18 split shadow-copy creation out of the critical
+NTDS rule, the deterministic path measured 61.5% malicious (Brier 0.321).
 
 **Reading it:**
 
-- **Laya does not discriminate on this set.** Its P(malicious) averaged 0.588 on
+- **Laya does not discriminate on this set.** Its P(malicious) averaged 0.589 on
   real attacks and 0.585 on benign cases, and it called all 39 malicious. It never
   chose informational or low severity, and never suppress, monitor or enrich.
 - **Its good calibration numbers are hollow.** A Brier of 0.250 is exactly what
   always answering 0.5 scores, and a low ECE is easy when every answer sits near
   0.59 and about half are right.
-- **Its confidence never exceeded 0.07.** Under AutoSIEM's default thresholds
+- **Its confidence never exceeded 0.08.** Under AutoSIEM's default thresholds
   (accept 0.75, review 0.5) every Laya answer would be recorded and ignored. The
   engine's design held: a useless signal was kept out of the pipeline.
-- **The deterministic path is not good either.** Its malicious Brier (0.32) is
+- **The deterministic path is not good either.** Its malicious Brier (0.300) is
   worse than a coin flip, because a risk score is not a probability, and it asks
   for investigation on 11 of the 13 cases labelled suppress. That is the gap a
   typed-decision model would need to close.
