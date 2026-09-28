@@ -14,6 +14,8 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from .private_files import create_private
+
 
 class QueueFullError(Exception):
     """Raised when a durable queue exceeds its configured ``max_pending``."""
@@ -109,6 +111,8 @@ class DurableQueue:
 
     def __init__(self, path: str) -> None:
         self.path = str(path)
+        if self.path != ":memory:" and not self.path.startswith("file:"):
+            create_private(self.path)
         self._conn = sqlite3.connect(self.path)
         self._conn.execute(
             """

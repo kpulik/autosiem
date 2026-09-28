@@ -48,6 +48,10 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
 3. **Ingest Protection (`src/autosiem/web/api.py`)**
    - Payload size limit (`AUTOSIEM_MAX_INGEST_BYTES`, default 10MB).
    - Maximum event count per batch (`AUTOSIEM_MAX_INGEST_EVENTS`, default 10,000).
+   - JSON nested deeper than 64 levels is refused with a 400 (SEC-016). Before this, 900 levels
+     overflowed the interpreter stack and returned a 500. On the CLI and listener path such a line
+     is kept as a plain `message` event with `format: json-too-deep`, so one hostile line cannot
+     take the rest of a file down with it.
 
 4. **Listener Hardening (`src/autosiem/listeners.py`)**
    - UDP Syslog/CEF listener IP allowlisting (`allowed_hosts`).
@@ -72,5 +76,14 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
    - **Control plane:** `rule_state` uses a composite `(rule_id, tenant_id)` primary key and `suppressions` carries a `tenant_id`, so one tenant's rule toggle or suppression cannot change detection for another.
    - Cross-tenant fetches return **404 rather than 403**, so callers cannot probe for the existence of other tenants' records.
    - Existing single-tenant deployments are unaffected: an automatic migration back-fills `default`, and unscoped callers (CLI, legacy single-token mode) still see every row.
+
+8. **Files at Rest (`src/autosiem/private_files.py`)**
+   - The users file, intel state, SQLite database, archive journal and durable queue are created
+     **owner-only (0600)** (SEC-016). The users file and intel state are rewritten atomically, so
+     an older world-readable copy comes out 0600 on the next save.
+   - An **existing** database, journal or queue keeps its mode, so an operator's deliberate choice
+     stands. Installs created before this change should run
+     `chmod 600 data/*.db data/*.json`.
+   - Contents are not encrypted by AutoSIEM. Use full-disk encryption on the host.
 
 For a full historical threat model and audit history, see [`docs/security-review.md`](docs/security-review.md).

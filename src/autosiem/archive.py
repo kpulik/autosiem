@@ -14,6 +14,8 @@ import json
 import os
 from typing import Any
 
+from .private_files import create_private
+
 
 class JournalFile:
     """An append-only, JSON-lines journal of records keyed by sequence."""
@@ -39,6 +41,7 @@ class JournalFile:
         if seq is None:
             seq = self.sequence()
         line = json.dumps({"seq": seq, "record": record})
+        create_private(self.path)
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         return seq

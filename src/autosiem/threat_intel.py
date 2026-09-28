@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .private_files import write_private_text
 from .schemas import Finding, NormalizedEvent, Severity
 
 THREAT_INTEL_RULE_ID = "AUTO-INTEL-001"
@@ -127,9 +128,7 @@ def save_intel_state(path: str | Path, indicators: list[StixIndicator]) -> None:
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {"indicators": [ind.to_dict() for ind in indicators]}
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    write_private_text(p, json.dumps(payload, indent=2))
 
 
 def default_intel_state(db_path: str | Path) -> Path:

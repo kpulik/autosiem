@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .private_files import write_private_text
+
 # --- Permissions -----------------------------------------------------------
 PERM_INGEST = "ingest:events"
 PERM_DATA_READ = "data:read"
@@ -365,7 +367,7 @@ class Rbac:
                 ]
             }
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        write_private_text(target, json.dumps(payload, indent=2) + "\n")
 
 
 def rbac_from_env(env: Mapping[str, str] | None = None) -> Rbac:
