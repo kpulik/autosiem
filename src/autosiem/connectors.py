@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from .net import InsecureURLError, require_https
+from .net import InsecureURLError, open_url, require_https
 from .sigv4 import sign_request
 
 #: Socket timeout for every connector HTTP call. Without it urlopen inherits
@@ -889,7 +889,7 @@ def _urllib_get(url: str, headers: dict[str, str]) -> tuple[int, dict[str, str],
     """Stdlib GET returning ``(status, headers, body)``; no third-party deps."""
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with open_url(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.status, dict(response.headers.items()), response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = ""
@@ -1478,7 +1478,7 @@ def _urllib_post_form(url: str, headers: dict[str, str],
     data = urllib.parse.urlencode(form).encode("utf-8")
     request = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with open_url(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.status, dict(response.headers.items()), response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         body = ""
@@ -1750,7 +1750,7 @@ def _urllib_get_bytes(url: str, headers: dict[str, str]) -> tuple[int, dict[str,
     """Stdlib GET returning raw bytes; CloudTrail objects are gzip, not text."""
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+        with open_url(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
             return response.status, dict(response.headers.items()), response.read()
     except urllib.error.HTTPError as exc:
         body = b""

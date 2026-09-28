@@ -96,7 +96,7 @@ def test_intel_refresh_accepts_https(tmp_path: Path, monkeypatch) -> None:
         def read(self):
             return json.dumps({"type": "bundle", "objects": []}).encode()
 
-    monkeypatch.setattr(update_job.urllib.request, "urlopen", lambda url, timeout=0: _Response())
+    monkeypatch.setattr(update_job, "open_url", lambda url, timeout=0: _Response())
     job = UpdateJob(db_path=tmp_path / "a.db", intel_url="https://feed.test/bundle.json")
     report = job.run_once()
     assert not any("non-HTTPS" in message for message in report.messages)

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import threading
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,7 +27,7 @@ from .attack_matrix import (
 )
 from .coverage import coverage_report
 from .kev import default_kev_state, refresh_kev
-from .net import require_https
+from .net import open_url, require_https
 from .rules import load_rules
 from .threat_intel import (
     default_intel_state,
@@ -183,7 +182,7 @@ class UpdateJob:
                 # Indicators are bare match strings with no signature, so the
                 # transport is the only integrity check there is (SEC-017).
                 url = require_https(self.intel_url, what="threat intel")
-                with urllib.request.urlopen(url, timeout=INTEL_FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310 (network is the point of this job)
+                with open_url(url, timeout=INTEL_FETCH_TIMEOUT_SECONDS) as response:
                     data = json.loads(response.read().decode("utf-8"))
                 return parse_stix_bundle(data)
             except Exception as exc:  # network/json failures must not kill the job

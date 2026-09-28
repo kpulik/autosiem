@@ -28,7 +28,7 @@ access); both are fixed.
 |---|---|
 | **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 011, 013, 015, 016, 018, 019, 020, 021 |
 | **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy), SEC-014 (events are stored as ingested; evidence is not rewritten) |
-| **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
+| **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-017 (HTTPS enforced on every hop including redirects, and credentials never follow a redirect to another origin; no feed signing, because none of the upstream feeds publishes a signature) |
 
 The detail sections below are the record of each finding and its fix.
 
@@ -286,6 +286,7 @@ predate the PostgreSQL work and shipped to public main.
 | **Location** | `update_job.py:_load_indicators` (L81-99, `urllib.request.urlopen` with `# noqa: S310` at L85); `threat_intel.py:load_intel_state`/`save_intel_state` (L112-132) |
 | **Description** | `--intel-url` fetches a STIX bundle over whatever scheme is given, including plain `http://`, where a MITM can tamper with the feed (indicators are just match strings — a tampered bundle yields fabricated findings or false-negatives). `https://` uses the default CA verification (good for that path). State-file writes are atomic (good). |
 | **Recommendation** | Enforce `https://` for `--intel-url` and `AUTOSIEM_LLM_URL` when remote; sign the bundle or pin the feed; add an allow-list/SSRF guard if auto-refreshing in production. |
+| **Status** | Transport fixed 2026-08-10/09-14; **redirects fixed 2026-09-27** (see "SEC-017 redirects" below). Signing stays open because there is nothing to verify against: SigmaHQ releases, the MITRE ATT&CK STIX bundle and the CISA KEV JSON are all published unsigned. |
 | **Severity** | **Low** |
 
 ### Verified clean — SQL injection through the search DSL (no vulnerability)
@@ -318,7 +319,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is (**documented as deliberate 2026-09-27**); docs hygiene verified | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
 | SEC-015 | Low | ~~`/health` leaks db/rules paths~~ **fixed 2026-09-27** | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
 | SEC-016 | Low | ~~Deep/oversized JSON → 500/memory; plaintext at rest + umask perms~~ **fixed 2026-09-27** (depth cap 64, owner-only files; encryption at rest is the host's) | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
-| SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**, extended to both API connectors **2026-09-14**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py`; `connectors.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
+| SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**, extended to both API connectors **2026-09-14**, redirects **2026-09-27**; no feed signing (none published upstream) | `update_job.py:_load_indicators`; `net.py`; `connectors.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
 | Verified clean | — | Search DSL → parameterized SQL (no injection) | `storage.py` L321-393 | Keep `?`-only binding; review rule for future SQL |
 
 ---
@@ -442,8 +443,45 @@ the resolution table above and "SEC-006 / SEC-008 in detail" below.
 ~~1. SEC-005~~ **closed 2026-09-17**, with limits; see "SEC-005 (audit sealing) in detail" below.
 ~~2. SEC-009 / SEC-007 / SEC-012~~ **closed 2026-09-17**; see "SEC-007 / SEC-009 / SEC-012 in detail" below.
 
-1. **SEC-017 (the unfixed half)** — feed signing/pinning and an SSRF allow-list; the HTTPS
-   transport rule is done.
+1. **SEC-017 (what is left)** — feed signing, which needs upstream signatures that do not
+   exist yet, and an allow-list for internal HTTPS hosts reachable by redirect. The
+   transport rule and the redirect policy are done.
+
+### SEC-017 redirects (fixed 2026-09-27)
+
+`require_https` checked only the first URL, and `urllib` follows redirects on its
+own: to plaintext, to any host, and **with every header**. Reproduced against
+`main` over real TLS: `cli poll --connector okta-api` sent `Authorization: SSWS
+<token>` to the host a 302 named. The same applied to the GitHub and Entra
+bearer tokens, the CloudTrail signed requests, the LLM API key and the Jev key.
+
+`net.open_url` now carries every outbound request (all nine call sites; a guard
+test fails if a new module calls `urlopen` directly). Its redirect handler:
+
+- refuses any hop off HTTPS. Plaintext is followed only loopback to loopback, for a
+  caller that opted into loopback (a local model server), so a remote server cannot
+  bounce a request onto this machine's plaintext services. This also rules out the
+  cloud metadata endpoint, which speaks HTTP only.
+- drops `Authorization`, `Proxy-Authorization` and `Cookie` when a hop changes
+  origin (scheme, host or port), as browsers and `requests` do. The redirect is
+  still followed, because SigmaHQ release downloads legitimately move to another
+  GitHub host.
+- names only the refused origin in its error, since a redirect URL can carry a
+  signed query string.
+
+Verified by output: over a self-signed TLS pair, the cross-origin hop arrives with
+no `Authorization`, and a redirect to `http://169.254.169.254/` makes `poll`
+print one line, `refusing a redirect from 127.0.0.1 to http://169.254.169.254:
+redirects must stay on HTTPS`. Tests: `test_redirect_policy.py` (11), including
+one that asserts plain `urllib` still leaks, so the policy is not kept past its
+reason.
+
+Not covered: a redirect to an **internal HTTPS** host. The request is blind (the
+response is parsed as feed data, never returned to the redirecting server) and
+needs the feed host itself compromised, but an allow-list would close it.
+`backends.py` still calls `urlopen` directly; it sends no credentials and its
+plaintext cluster URLs predate the transport policy. `projections.py` refuses
+every redirect, which is stricter.
 
 ### SEC-005 (audit sealing) in detail (fixed 2026-09-17)
 

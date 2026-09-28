@@ -24,7 +24,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
-from ..net import require_https
+from ..net import InsecureURLError, open_url, require_https
 from .config import DecisionConfig, JevConfig, LayaConfig
 from .types import (
     DecisionConfigError,
@@ -78,7 +78,7 @@ def _urllib_transport(url: str, body: bytes, headers: dict[str, str], timeout: f
     for key, value in headers.items():
         request.add_header(key, value)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout, allow_loopback=True) as response:
             return int(getattr(response, "status", 200) or 200), response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:  # a status, not a transport failure
         detail = ""
@@ -87,7 +87,7 @@ def _urllib_transport(url: str, body: bytes, headers: dict[str, str], timeout: f
         except Exception:  # pragma: no cover - body already consumed
             detail = ""
         return int(exc.code), detail
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, OSError, InsecureURLError) as exc:
         raise DecisionUnavailable(f"jev request failed: {exc}") from exc
 
 
