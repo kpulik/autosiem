@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from .net import require_https
+from .net import open_url, require_https
 from .schemas import DetectionRule, NormalizedEvent
 from .sigma import SigmaParseError, UnmappedLogsourceError, parse_sigma_yaml, sigma_to_rule
 
@@ -111,7 +111,7 @@ def _default_fetch(url: str) -> bytes:
     request = urllib.request.Request(
         require_https(url, what="SigmaHQ rules"), headers={"User-Agent": USER_AGENT}
     )
-    with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310
+    with open_url(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
         return bytes(response.read())
 
 

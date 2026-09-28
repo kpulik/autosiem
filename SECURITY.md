@@ -92,4 +92,11 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
      what is kept. Stop a source logging secrets at the source; the owner-only file modes above
      and host encryption protect what was already logged.
 
+9. **Outbound Transport (`src/autosiem/net.py`)**
+   - Every remote fetch (threat intel, KEV, ATT&CK, SigmaHQ, the four API connectors, LLM and
+     System One calls) must use HTTPS; plaintext is allowed only to loopback, for local model
+     servers (SEC-017).
+   - The rule holds on every redirect hop, and `Authorization`/`Cookie` headers are dropped when a
+     redirect changes origin, so a feed or API host cannot forward AutoSIEM's credentials elsewhere.
+
 For a full historical threat model and audit history, see [`docs/security-review.md`](docs/security-review.md).

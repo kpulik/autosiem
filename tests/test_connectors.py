@@ -417,11 +417,11 @@ def test_every_connector_http_call_carries_a_timeout(monkeypatch) -> None:
         def __exit__(self, *_exc: object) -> None:
             return None
 
-    def fake_urlopen(request: object, timeout: object = None) -> FakeResponse:
+    def fake_open_url(request: object, timeout: object = None) -> FakeResponse:
         seen.append(timeout)
         return FakeResponse()
 
-    monkeypatch.setattr(connectors.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(connectors, "open_url", fake_open_url)
     connectors._urllib_get("https://example.test/a", {})
     connectors._urllib_post_form("https://example.test/token", {}, {"k": "v"})
     assert seen == [connectors.HTTP_TIMEOUT_SECONDS, connectors.HTTP_TIMEOUT_SECONDS]

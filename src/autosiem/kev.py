@@ -26,7 +26,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from .net import require_https
+from .net import open_url, require_https
 
 KEV_URL = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
 USER_AGENT = "autosiem-kev"
@@ -79,7 +79,7 @@ def _default_fetch(url: str) -> bytes:
     request = urllib.request.Request(
         require_https(url, what="the KEV catalogue"), headers={"User-Agent": USER_AGENT}
     )
-    with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310
+    with open_url(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
         return bytes(response.read())
 
 

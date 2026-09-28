@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .ai import Investigator
-from .net import InsecureURLError, require_https
+from .net import InsecureURLError, open_url, require_https
 from .redaction import Redactor
 from .schemas import Finding, Incident
 from .soc_runtime import DecisionType
@@ -189,9 +189,9 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeo
     for key, value in headers.items():
         request.add_header(key, value)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with open_url(request, timeout=timeout, allow_loopback=True) as response:
             return json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError, InsecureURLError) as exc:
         raise LLMError(f"LLM request failed: {exc}") from exc
 
 

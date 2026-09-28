@@ -28,7 +28,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
-from .net import require_https
+from .net import open_url, require_https
 
 #: The index that ships inside the package. Treated as read-only: a refresh
 #: writes elsewhere, so an installed wheel never diverges from what was built
@@ -194,7 +194,7 @@ def _require_https(url: str) -> str:
 
 def _default_fetch(url: str) -> bytes:
     request = urllib.request.Request(_require_https(url), headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:  # noqa: S310
+    with open_url(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
         return bytes(response.read())
 
 
