@@ -85,5 +85,11 @@ AutoSIEM follows zero-trust and defense-in-depth principles:
      stands. Installs created before this change should run
      `chmod 600 data/*.db data/*.json`.
    - Contents are not encrypted by AutoSIEM. Use full-disk encryption on the host.
+   - **Events are stored exactly as ingested**, including the original `raw` payload and any
+     secret a source happened to log (SEC-014). This is deliberate: evidence that the SIEM
+     rewrote on the way in cannot be relied on in an investigation. Redaction applies to what
+     *leaves* the process (LLM and System One prompts, `src/autosiem/redaction.py`), not to
+     what is kept. Stop a source logging secrets at the source; the owner-only file modes above
+     and host encryption protect what was already logged.
 
 For a full historical threat model and audit history, see [`docs/security-review.md`](docs/security-review.md).

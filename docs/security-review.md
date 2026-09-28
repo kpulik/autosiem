@@ -27,9 +27,8 @@ access); both are fixed.
 | Status | Findings |
 |---|---|
 | **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 011, 013, 015, 016, 018, 019, 020, 021 |
-| **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy) |
+| **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy), SEC-014 (events are stored as ingested; evidence is not rewritten) |
 | **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
-| **Open** | SEC-014 (event payloads stored as sent) |
 
 The detail sections below are the record of each finding and its fix.
 
@@ -204,6 +203,7 @@ surface.
 | **Location** | `llm.py:config_from_env` (L66-84, reads `AUTOSIEM_LLM_API_KEY`), `rbac.py:rbac_from_env` (L274-284), `api.py` env reads (L49-56); `storage.py` persists raw event payloads in `events.data` |
 | **Description** | No hardcoded secrets in the source; tokens/keys come from env read at call time — keep this. Two notes: (a) `events.data`/`findings.data` persist whatever the ingest payload contained, so a client that logs secrets into events stores them at rest (see SEC-016/SEC-014-data-at-rest); (b) examples and docs must never print real tokens, and a `.env.example` (empty values) would help operators. The LLM API key is only sent to the configured `base_url` and only when present (`llm.py:122-123`) — good. |
 | **Recommendation** | Keep env-only secrets; add `.env.example` with empty values; document that event payloads are stored as-is; never print tokens in docs/examples. |
+| **Status** | **Closed 2026-09-27, by design.** Checked each item: secrets are still env-only; `.env.example` exists with every secret empty; a pattern search of README, SECURITY, CONTRIBUTING, `docs/`, `examples/`, `scripts/` and `.env.example` finds no token-shaped value. Confirmed that an ingested `password` field lands verbatim in `events.data`, and documented it in `SECURITY.md` as deliberate: a SIEM that rewrites evidence on ingest cannot be relied on in an investigation. Redaction covers what leaves the process; SEC-016's owner-only files and host encryption cover what stays. |
 | **Severity** | **Low** |
 
 ### SEC-015 — Info disclosure via `/health` (Low)
@@ -315,7 +315,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-011 | Medium | ~~Redaction misses JSON-form labels, JWTs, AWS secret keys~~ **fixed 2026-09-27**; heuristic by nature; `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
 | SEC-012 | Medium | No TLS in-app (by design); ~~docs/README show plain `http://` + `--reload`~~ **docs fixed 2026-09-17** | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
-| SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
+| SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is (**documented as deliberate 2026-09-27**); docs hygiene verified | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
 | SEC-015 | Low | ~~`/health` leaks db/rules paths~~ **fixed 2026-09-27** | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
 | SEC-016 | Low | ~~Deep/oversized JSON → 500/memory; plaintext at rest + umask perms~~ **fixed 2026-09-27** (depth cap 64, owner-only files; encryption at rest is the host's) | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
 | SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**, extended to both API connectors **2026-09-14**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py`; `connectors.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
