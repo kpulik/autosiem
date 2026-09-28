@@ -26,9 +26,9 @@ access); both are fixed.
 
 | Status | Findings |
 |---|---|
-| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 015, 016, 018, 019, 020, 021 |
+| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 011, 013, 015, 016, 018, 019, 020, 021 |
 | **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy) |
-| **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-011 (two token patterns closed; redaction is still heuristic), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
+| **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
 | **Open** | SEC-014 (event payloads stored as sent) |
 
 The detail sections below are the record of each finding and its fix.
@@ -176,6 +176,7 @@ surface.
 | **Location** | `redaction.py` (L20-126): `_LABELLED_SECRET`, `_HIGH_ENTROPY`, `_AWS_ACCESS_KEY`, `_SSH_KEY`, `_IPV4`, `_EMAIL`, `_SSN`, `_IPV6`, `_CREDIT_CARD_RE`; `llm.py:config_from_env` `mask_pii` (L81) |
 | **Description** | Redaction is deterministic and layered: labelled secrets always; high-entropy tokens (`sk-`, `ghp_`, `Bearer …`) always; AWS `AKIA…`; SSH key blocks; IP/email/SSN/IPv6 only when `mask_pii`. Known gaps: (a) plain passwords or keys in prose are only caught if they follow `key=value`/a known prefix; (b) JWTs/opaque tokens are not matched (not in `_HIGH_ENTROPY`); (c) the AWS **secret key** itself is not matched — only the `AKIA…` access key ID (L33); (d) `AUTOSIEM_LLM_MASK_PII=0|false|no` turns PII masking **off globally** (llm.py:81). It defaults to on; anyone disabling it sends IPs/emails/SSNs to the model unmasked. |
 | **Recommendation** | Extend patterns to JWT/opaque tokens and cloud secret-key material; keep `mask_pii` on by default; treat `AUTOSIEM_LLM_MASK_PII=0` as a conscious, documented decision. |
+| **Status** | **Fixed 2026-09-27** (see "SEC-011 finished" below). The gap was wider than (a)-(c): a labelled secret in **JSON form** (`{"password": "x"}`) was not masked at all, and every LLM prompt is built with `json.dumps`. Residual, by construction: a secret with no label, no known prefix and no known shape (a bare password in prose) cannot be told apart from ordinary text. (d) stays an operator decision; the default is on. |
 | **Severity** | **Medium** |
 
 ### SEC-012 — No in-app TLS; docs/README show plain `http://` and dev `--reload` (Medium)
@@ -311,7 +312,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-008 | Medium | Users-file tokens: unsalted sha256, no rotation/expiry, `load()` accepts plaintext `token` | `rbac.py:hash_token` L96-98; `load` L157-181; `save` L253-271 | KDF + salt; `rotate-token`; reject plaintext `token` on load |
 | SEC-009 | Medium | ~~Audit-actor spoofing via caller `actor` param (legacy); `/ui/*` hardcode `analyst`~~ **fixed 2026-09-17** | `api.py:_actor` L99-103; L193-209, L246-271; L622/700/710 | Actor from authenticated principal only; drop/deny caller `actor` when auth off |
 | SEC-010 | Medium | LLM prompt-injection surface; ~~RAG `extra_context` unredacted~~ **redacted 2026-09-27** | `llm.py` L241-299, L294-298; `rag.py` L145-168 | `redact` `extra_context`; keep schema validation + deny-unknown-action policy |
-| SEC-011 | Medium | Redaction is heuristic (two token gaps closed 2026-09-23); `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
+| SEC-011 | Medium | ~~Redaction misses JSON-form labels, JWTs, AWS secret keys~~ **fixed 2026-09-27**; heuristic by nature; `AUTOSIEM_LLM_MASK_PII=0` disables PII masking | `redaction.py` L20-126; `llm.py` L81 | Extend patterns (JWT, cloud secret keys); keep PII masking on by default |
 | SEC-012 | Medium | No TLS in-app (by design); ~~docs/README show plain `http://` + `--reload`~~ **docs fixed 2026-09-17** | `pyproject.toml`; `README.md`; `docs/deployment-and-collection.md` | Reverse-proxy TLS; drop `--reload`; only loopback examples |
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
@@ -580,6 +581,36 @@ Found while building the System One state builder, which sends a whitelisted
 
 SEC-011 stays open: redaction is still heuristic, and this fixed two known
 patterns rather than the class of problem.
+
+### SEC-011 finished (2026-09-27)
+
+Probed with the shapes AutoSIEM actually handles before changing anything. Every
+one of these reached the model unmasked:
+
+- **JSON keys.** `_LABELLED_SECRET` wanted `:`/`=` directly after the word, so
+  `"password": "x"` (a closing quote in between) never matched. Every LLM prompt
+  is `json.dumps` of the incident and its evidence, so this was the common case,
+  not an edge. JSON escaped inside a string (`\"password\": \"x\"`) is handled too.
+- **Prefixed labels.** `\bsecret\b` does not match inside `client_secret`
+  (Entra), `aws_secret_access_key`, `SecretAccessKey`, `sessionToken` or
+  `refresh_token`, because `_` and letters are word characters. A label is now
+  any identifier containing a secret word, with bounded affixes.
+- **Okta `SSWS` and `Basic` authorization schemes** left the token behind, the
+  same bug Bearer had.
+- **AWS secret access keys** with no label (`aws configure set
+  aws_secret_access_key <key>`): 40 base64 characters requiring upper, lower and a
+  digit or `/`/`+`, which keeps single-case hex SHA-1 hashes out.
+- **JWTs** (`eyJ….eyJ….sig`) and GitHub `gho_`/`ghu_`/`ghs_`/`ghr_`/`github_pat_`
+  tokens (only `ghp_` was covered).
+
+The label now survives (`client_secret": "<REDACTED>`), so the reader still
+knows a secret was present. Verified on the real path: an event carrying a
+`password` field and an `aws configure` command line leaked both into the LLM
+prompt on `main` and masks both here; the unmodified demo prompt carries zero
+redaction markers before and after, so nothing an analyst needs was lost.
+Hostile 1 MB inputs (long alphanumeric runs, base64, repeated labels) redact in
+about 0.1 s each. Tests: 27 new in `test_redaction.py`, including hashes, GUIDs
+and rule ids that must be kept.
 
 ### SEC-006 / SEC-008 in detail — token storage (fixed 2026-09-16)
 

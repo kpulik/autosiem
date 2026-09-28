@@ -147,7 +147,7 @@ See `docs/deployment-and-collection.md` §"Distributed pipeline" for full config
 | `distributed.py` | **NEW**: High-level distributed pipeline coordinator; reads `AUTOSIEM_*` env vars, orchestrates queue/archive/workers/backends; wired into CLI `ingest`/`listen` |
 | `metrics.py` | `Counter`/`Gauge`/`Histogram`, `MetricsRegistry`, Prometheus `prometheus_text` export, `ApplicationMetrics` singleton, `Span`/`Trace` timing — wired as `cli metrics` + `GET /metrics` |
 | `rbac.py` | Multi-tenant RBAC: roles `admin`/`analyst`/`ingest`/`viewer`, permission constants, JSON user store keyed by **salted PBKDF2 token hashes** (SEC-008), `rbac_from_env()` — wired into the API token guard + CLI `users` (list/add/remove/roles); legacy `AUTOSIEM_API_TOKEN` remains the fallback when no users file is configured |
-| `redaction.py` | Per-class PII/secrets redaction (labelled secrets, AKIA/SSH keys, Luhn card numbers, SSN, IP/email/IPv6); re-exported as `autosiem.llm.Redactor` |
+| `redaction.py` | Per-class PII/secrets redaction (labelled secrets in key=value, header and JSON form; JWTs; AWS access and secret keys; GitHub/OpenAI token prefixes; SSH keys; Luhn card numbers; SSN, IP/email/IPv6); re-exported as `autosiem.llm.Redactor` |
 | `rag.py` | `RunbookIndex` over `.md` runbooks (ATT&CK-tagged), keyword + TF-IDF-lite retrievers, `RagEngine`, `augment_prompt` — wired as RAG context in `AutoSIEMPipeline` |
 | `querygen.py` | Natural-language → canonical search DSL (`translate_query`), CLI-flag rendering (`to_cli_flags`), `QueryTranslator` — wired as CLI `search-nl` + `GET /api/search-nl` |
 | `rule_assistant.py` | `draft_rule(description, techniques)`, `write_rule_file`, `generate_test_cases` — wired as CLI `rule-new` |
