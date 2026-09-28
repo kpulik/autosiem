@@ -9,15 +9,16 @@ handle them uniformly.
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import tempfile
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
 
+from .net import open_url
 from .pipeline import AutoSIEMPipeline
 from .rules import load_rules
 from .storage import AutoSIEMStorage
@@ -27,8 +28,37 @@ from .storage import AutoSIEMStorage
 DEFAULT_RULES = Path(__file__).resolve().parents[2] / "rules"
 
 
+#: Socket timeout for every backend call. urlopen's default is none, so a
+#: cluster that accepts and never answers hung ingest for ever.
+HTTP_TIMEOUT_SECONDS = 30.0
+
+
 class BackendError(RuntimeError):
     """Raised when a backend cannot store or list events."""
+
+
+def _http_text(url: str, service: str, body: str | None = None) -> str:
+    """GET ``url`` (POST ``body`` when given) and return the decoded reply.
+
+    Every way a cluster or its URL can fail becomes ``BackendError``: OSError
+    (refused, reset, and a read timeout, which is a TimeoutError rather than a
+    URLError), http.client.HTTPException (a truncated or non-HTTP reply, a bad
+    port), and ValueError (a malformed URL, a body that is not UTF-8, a redirect
+    off HTTPS). The request is built inside the guard so a bad URL is covered too.
+    """
+    try:
+        request = urllib.request.Request(
+            url,
+            data=None if body is None else body.encode("utf-8"),
+            method="GET" if body is None else "POST",
+        )
+        # The configured URL is the operator's and may be plaintext inside a trusted
+        # network (both clusters default to http://localhost); allow_loopback
+        # only governs redirect hops. See SEC-017 in docs/security-review.md.
+        with open_url(request, timeout=HTTP_TIMEOUT_SECONDS, allow_loopback=True) as response:
+            return response.read().decode("utf-8")
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        raise BackendError(f"{service} request failed: {exc}") from exc
 
 
 class EventBackend:
@@ -64,18 +94,10 @@ class ClickHouseBackend(EventBackend):
         return f"{self.url}/?{urllib.parse.urlencode({'query': query})}"
 
     def _post(self, url: str, body: str) -> str:
-        request = urllib.request.Request(url, data=body.encode("utf-8"), method="POST")
-        return self._urlopen(request)
+        return _http_text(url, "ClickHouse", body)
 
     def _get(self, url: str) -> str:
-        return self._urlopen(urllib.request.Request(url, method="GET"))
-
-    def _urlopen(self, request_or_url: Any) -> str:
-        try:
-            response = urllib.request.urlopen(request_or_url)
-            return response.read().decode("utf-8")
-        except urllib.error.URLError as exc:
-            raise BackendError(f"ClickHouse request failed: {exc}") from exc
+        return _http_text(url, "ClickHouse")
 
 
 class OpenSearchBackend(EventBackend):
@@ -104,18 +126,10 @@ class OpenSearchBackend(EventBackend):
         return [hit.get("_source") for hit in data.get("hits", {}).get("hits", [])]
 
     def _post(self, url: str, body: str) -> str:
-        request = urllib.request.Request(url, data=body.encode("utf-8"), method="POST")
-        return self._urlopen(request)
+        return _http_text(url, "OpenSearch", body)
 
     def _get(self, url: str) -> str:
-        return self._urlopen(urllib.request.Request(url, method="GET"))
-
-    def _urlopen(self, request_or_url: Any) -> str:
-        try:
-            response = urllib.request.urlopen(request_or_url)
-            return response.read().decode("utf-8")
-        except urllib.error.URLError as exc:
-            raise BackendError(f"OpenSearch request failed: {exc}") from exc
+        return _http_text(url, "OpenSearch")
 
 
 class SqliteBackend(EventBackend):

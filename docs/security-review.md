@@ -455,8 +455,9 @@ own: to plaintext, to any host, and **with every header**. Reproduced against
 <token>` to the host a 302 named. The same applied to the GitHub and Entra
 bearer tokens, the CloudTrail signed requests, the LLM API key and the Jev key.
 
-`net.open_url` now carries every outbound request (all nine call sites; a guard
-test fails if a new module calls `urlopen` directly). Its redirect handler:
+`net.open_url` now carries every outbound request (every call site, `backends.py`
+included; an AST-based guard test fails if a new module names `urlopen` or
+`build_opener`, however it imports them). Its redirect handler:
 
 - refuses any hop off HTTPS. Plaintext is followed only loopback to loopback, for a
   caller that opted into loopback (a local model server), so a remote server cannot
@@ -479,9 +480,13 @@ reason.
 Not covered: a redirect to an **internal HTTPS** host. The request is blind (the
 response is parsed as feed data, never returned to the redirecting server) and
 needs the feed host itself compromised, but an allow-list would close it.
-`backends.py` still calls `urlopen` directly; it sends no credentials and its
-plaintext cluster URLs predate the transport policy. `projections.py` refuses
-every redirect, which is stricter.
+`backends.py` joined the redirect policy on 2026-09-28 and got a 30 s timeout (a
+cluster that accepted and never answered hung ingest for ever). Its configured URL
+is still not required to be HTTPS (see the 2026-09-14 amendment below), so
+`allow_loopback=True` there governs redirect hops only. A failing cluster, a
+truncated or non-HTTP reply, a non-UTF-8 body or a malformed URL is one
+`BackendError`, and the CLI reports it as one line. `projections.py` refuses every
+redirect, which is stricter (`test_projections.py` proves it with a real 307).
 
 ### SEC-005 (audit sealing) in detail (fixed 2026-09-17)
 
@@ -808,8 +813,10 @@ whole audit log in cleartext. Both API-native connectors now route through
 remote by definition, unlike the local model server the LLM path allows. Tests
 in `test_okta_api_connector.py` and `test_github_api_connector.py` cover it.
 
-`backends.py` (ClickHouse/OpenSearch) is still deliberately not covered: it
-commonly runs on plaintext inside a trusted network. Note that the PostgreSQL
+`backends.py` (ClickHouse/OpenSearch) is still deliberately exempt from the HTTPS
+requirement on its configured URL, because it commonly runs on plaintext inside a
+trusted network (it does follow the redirect policy and has a timeout since
+2026-09-28; see "SEC-017 redirects"). Note that the PostgreSQL
 outbox projection added in 2026-09 takes the stricter line for the same
 destinations, requiring HTTPS outside loopback (`projections.EventProjection`).
 

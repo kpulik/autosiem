@@ -5,10 +5,12 @@ import hashlib
 import json
 import os
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
+from .backends import BackendError
 from .pipeline import AutoSIEMPipeline, PipelineResult
 from .rbac import ROLE_PERMISSIONS, ROLES, Rbac
 from .storage import DEFAULT_DB_PATH, DEFAULT_TENANT, RelationalStorage, open_storage
@@ -314,7 +316,8 @@ def main() -> None:
     if args.command in {"ingest", "demo", "poll"}:
         store = None if args.no_save else open_storage(args.db)
         engine = load_suppression_engine(store) if store else None
-        result = _run_pipeline_command(args, suppression_engine=engine, store=store)
+        with _event_backend_errors(saved=store is not None, queued=distributed_config_from_env().queue_enabled):
+            result = _run_pipeline_command(args, suppression_engine=engine, store=store)
         _print_pipeline_result(result, saved=store is not None, db=args.db)
         return
 
@@ -494,7 +497,9 @@ def main() -> None:
         config = decision_config_from_env()
         _print_json({"config": config.describe(), "stored": store.decision_stats()})
     elif args.command == "distributed":
-        _run_distributed(args)
+        # --replay opens the store, so its results are written before the backend.
+        with _event_backend_errors(saved=True, queued=True):
+            _run_distributed(args)
     elif args.command == "users":
         _run_users(args)
     elif args.command == "export":
@@ -645,6 +650,33 @@ def _make_llm(enable: bool) -> LLMService | None:
 def _add_storage_args(parser: argparse.ArgumentParser) -> None:
     _add_db_arg(parser)
     parser.add_argument("--no-save", action="store_true", help="Do not persist pipeline output to the configured store")
+
+
+@contextmanager
+def _event_backend_errors(*, saved: bool, queued: bool) -> Iterator[None]:
+    """Report a failing alternate event backend as one line, not a traceback.
+
+    The distributed path writes the primary store before the backend and
+    acknowledges the queue only after both. The message says what is true of
+    this run: ``saved`` is whether a primary store was written (not ``--no-save``)
+    and ``queued`` whether a durable queue is enabled. Replaying the queue
+    reprocesses its lines, and event, finding and incident ids are fresh each
+    time, so the message says so rather than implying a retry is free.
+    """
+    try:
+        yield
+    except BackendError as exc:
+        parts = [
+            "events already saved to the primary database are kept"
+            if saved
+            else "nothing was saved (--no-save), so re-ingest once the backend is back"
+        ]
+        if queued:
+            parts.append(
+                "durable-queue messages stay pending; replaying them reprocesses those lines "
+                "and saves their events and findings again"
+            )
+        raise SystemExit(f"{exc}; " + "; ".join(parts)) from None
 
 
 def _run_pipeline_command(args: argparse.Namespace, suppression_engine: SuppressionEngine | None = None, store: RelationalStorage | None = None) -> PipelineResult:
@@ -965,7 +997,8 @@ def _run_listener(args: argparse.Namespace) -> None:
             transactional_outbox=os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres",
         )
         # Replay any unacked messages from previous crash
-        replay_result = dist_pipeline.replay_from_queue()
+        with _event_backend_errors(saved=store is not None, queued=True):
+            replay_result = dist_pipeline.replay_from_queue()
         if replay_result.get("replayed", 0) > 0:
             print(f"Replayed {replay_result['replayed']} events from queue")
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from autosiem.cli import _CONNECTOR_IDENTITY, _connector_config, main
+from autosiem.storage import open_storage
 
 ROOT = Path(__file__).resolve().parents[1]
 RULES_DIR = ROOT / "rules"
@@ -271,3 +272,94 @@ def test_users_add_writes_a_salted_verifier(capsys, monkeypatch, tmp_path) -> No
     _run_cli(capsys, monkeypatch, "users", "add", "--file", str(users_file), "--name", "cy", "--token", "bo-tok")
     stored = [u["token_hash"] for u in json.loads(users_file.read_text(encoding="utf-8"))["users"]]
     assert len(stored) == 2 and stored[0] != stored[1]
+
+
+# --- a wedged alternate event backend -----------------------------------------
+# urlopen had no timeout, so ingest hung for ever; with one, the failure reached
+# the CLI as a BackendError traceback. It is operator configuration, not a crash.
+
+
+@pytest.fixture
+def wedged_backend(monkeypatch, silent_server) -> str:
+    import autosiem.backends as backends
+
+    monkeypatch.setattr(backends, "HTTP_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setenv("AUTOSIEM_BACKEND", "opensearch")
+    monkeypatch.setenv("AUTOSIEM_BACKEND_URL", silent_server)
+    return silent_server
+
+
+def _one_line_backend_failure(excinfo: pytest.ExceptionInfo[SystemExit]) -> str:
+    message = str(excinfo.value)
+    assert "OpenSearch request failed: timed out" in message
+    assert "\n" not in message and "Traceback" not in message
+    return message
+
+
+def test_ingest_reports_a_wedged_event_backend_in_one_line(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
+    db = tmp_path / "wedged.db"
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "ingest", "--file", str(ROOT / "examples" / "events.jsonl"), "--rules", str(RULES_DIR), "--db", str(db))
+    message = _one_line_backend_failure(excinfo)
+    assert "already saved to the primary database are kept" in message
+    assert "queue" not in message, "no queue is configured, so the message must not mention one"
+    # The primary store is written before the backend, so nothing was lost.
+    assert len(open_storage(db).list_events(limit=100)) == 15
+
+
+def test_a_no_save_ingest_does_not_claim_anything_was_saved(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
+    db = tmp_path / "unsaved.db"
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "ingest", "--no-save", "--file", str(ROOT / "examples" / "events.jsonl"), "--rules", str(RULES_DIR), "--db", str(db))
+    message = _one_line_backend_failure(excinfo)
+    assert "nothing was saved" in message and "re-ingest" in message
+    assert "already saved" not in message
+    assert not db.exists()
+
+
+def test_a_wedged_backend_leaves_the_durable_queue_unacknowledged(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
+    from autosiem.bus import DurableQueue
+
+    queue_path = tmp_path / "queue.db"
+    monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "ingest", "--file", str(ROOT / "examples" / "events.jsonl"), "--rules", str(RULES_DIR), "--db", str(tmp_path / "q.db"))
+    message = _one_line_backend_failure(excinfo)
+    # Replay reprocesses the lines and mints fresh ids, so a retry is not free.
+    assert "stay pending" in message and "saves their events and findings again" in message
+    assert DurableQueue(str(queue_path)).pending() == 15
+
+
+def _queue_with_one_pending_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    from autosiem.bus import DurableQueue
+
+    queue_path = tmp_path / "replay-queue.db"
+    DurableQueue(str(queue_path)).push(
+        topic="ingest", payload={"line": json.dumps({"user": "alice", "action": "login"}), "seq": 0}
+    )
+    monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
+    return queue_path
+
+
+def test_distributed_replay_reports_a_wedged_backend_in_one_line(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
+    _queue_with_one_pending_line(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(tmp_path / "r.db"))
+    message = _one_line_backend_failure(excinfo)
+    assert "stay pending" in message
+
+
+def test_listener_startup_replay_reports_a_wedged_backend_in_one_line(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
+    import autosiem.cli as cli
+
+    _queue_with_one_pending_line(tmp_path, monkeypatch)
+
+    def never_reached(*_args: object, **_kwargs: object) -> None:
+        # If replay did not raise, _run_listener would go on to serve for ever.
+        raise AssertionError("startup replay did not fail; the listener would have started")
+
+    monkeypatch.setattr(cli.SyslogServer, "start", never_reached)
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "l.db"))
+    message = _one_line_backend_failure(excinfo)
+    assert "stay pending" in message

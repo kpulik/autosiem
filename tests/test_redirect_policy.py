@@ -6,7 +6,7 @@ header, so before this an Okta ``SSWS`` token reached whatever host a 302 named.
 """
 from __future__ import annotations
 
-import re
+import ast
 import threading
 import urllib.request
 from collections.abc import Iterator
@@ -130,16 +130,48 @@ def test_open_url_follows_the_redirect_without_the_token(two_servers) -> None:
 # every outbound call site goes through the policy
 # --------------------------------------------------------------------------
 
-#: The one direct caller left: event backends send no credentials and their
-#: plaintext cluster URLs predate the transport policy. projections.py builds
-#: its own opener that refuses every redirect, which is stricter.
-_DIRECT_URLOPEN_ALLOWED = {"backends.py"}
+#: net.py builds the governed opener. projections.py builds one that refuses every
+#: redirect, which is stricter (tests/test_projections.py proves it with a real 302).
+_OPENER_OWNERS = {"net.py", "projections.py"}
+_OPENER_NAMES = {"urlopen", "build_opener"}
 
 
-def test_no_module_calls_urlopen_directly() -> None:
-    offenders = [
-        str(path.relative_to(SRC))
+def _opener_references(source: str) -> list[int]:
+    """Line numbers that name urlopen/build_opener in any form: a call, an
+    attribute (``request.urlopen``) or ``from urllib.request import urlopen``."""
+    lines: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Attribute) and node.attr in _OPENER_NAMES:
+            lines.append(node.lineno)
+        elif isinstance(node, ast.Name) and node.id in _OPENER_NAMES:
+            lines.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom) and any(alias.name in _OPENER_NAMES for alias in node.names):
+            lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        "import urllib.request\nurllib.request.urlopen(u)",
+        "from urllib import request\nrequest.urlopen(u)",
+        "from urllib.request import urlopen\nurlopen(u)",
+        "import urllib.request\nurllib.request.build_opener().open(u)",
+    ],
+)
+def test_the_guard_sees_every_way_to_reach_urlopen(snippet: str) -> None:
+    assert _opener_references(snippet)
+
+
+def test_the_guard_ignores_unrelated_code() -> None:
+    assert not _opener_references("import urllib.request\nreq = urllib.request.Request(u)\nopen_url(req)")
+
+
+def test_no_module_reaches_urlopen_outside_the_policy() -> None:
+    offenders = {
+        str(path.relative_to(SRC)): _opener_references(path.read_text(encoding="utf-8"))
         for path in SRC.rglob("*.py")
-        if path.name not in _DIRECT_URLOPEN_ALLOWED and re.search(r"urllib\.request\.urlopen\(", path.read_text(encoding="utf-8"))
-    ]
-    assert offenders == [], f"route these through net.open_url: {offenders}"
+        if path.name not in _OPENER_OWNERS
+    }
+    offenders = {name: lines for name, lines in offenders.items() if lines}
+    assert offenders == {}, f"route these through net.open_url: {offenders}"
