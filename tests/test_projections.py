@@ -76,3 +76,44 @@ def test_transport_failures_become_the_error_type_the_cli_catches() -> None:
         assert isinstance(caught.value, (ValueError, RuntimeError))
         # The backend body can echo the document back; only the status escapes.
         assert "a" not in str(caught.value).replace("failed", "")
+
+
+def test_a_redirecting_destination_is_refused_not_followed() -> None:
+    """net.open_url follows safe redirects; projections deliberately follows none."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    followed: list[str] = []
+
+    class Target(BaseHTTPRequestHandler):
+        def do_PUT(self) -> None:
+            followed.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    target = HTTPServer(("127.0.0.1", 0), Target)
+
+    class Redirector(BaseHTTPRequestHandler):
+        def do_PUT(self) -> None:
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{target.server_address[1]}/elsewhere")
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            return None
+
+    redirector = HTTPServer(("127.0.0.1", 0), Redirector)
+    for server in (redirector, target):
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        sink = EventProjection("opensearch", f"http://127.0.0.1:{redirector.server_address[1]}", "events")
+        with pytest.raises(RuntimeError, match="projection delivery failed: HTTPError 307"):
+            sink.deliver("default", "evt-1", {"user": "alice"})
+        assert followed == []
+    finally:
+        for server in (redirector, target):
+            server.shutdown()
+            server.server_close()
