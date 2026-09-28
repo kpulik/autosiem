@@ -12,6 +12,36 @@ _SYSLOG_RE = re.compile(
     r"^(?:<(?P<pri>\d+)>)?(?P<ts>\w{3}\s+\d{1,2}\s+\d\d:\d\d:\d\d)?\s*(?P<host>[\w.:-]+)?\s*(?P<msg>.*)$"
 )
 
+# SEC-016: the deepest JSON an event may nest. Vendor log formats sit in single
+# digits; 64 leaves room while staying far below the interpreter recursion limit
+# even inside the web server's stack, where 900 levels already overflowed.
+MAX_JSON_DEPTH = 64
+
+
+def load_json_bounded(text: str) -> Any:
+    """``json.loads`` that rejects nesting deeper than ``MAX_JSON_DEPTH``.
+
+    Raises ``ValueError`` (a ``json.JSONDecodeError`` for malformed input) so
+    callers keep one error path; a ``RecursionError`` never escapes.
+    """
+    try:
+        value = json.loads(text)
+    except RecursionError as exc:
+        raise ValueError(f"JSON nested deeper than {MAX_JSON_DEPTH} levels") from exc
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        node, depth = stack.pop()
+        if isinstance(node, dict):
+            children = list(cast(dict[str, Any], node).values())
+        elif isinstance(node, list):
+            children = cast(list[Any], node)
+        else:
+            continue
+        if depth > MAX_JSON_DEPTH:
+            raise ValueError(f"JSON nested deeper than {MAX_JSON_DEPTH} levels")
+        stack.extend((child, depth + 1) for child in children)
+    return value
+
 
 def parse_timestamp(value: Any) -> datetime:
     if isinstance(value, datetime):
@@ -33,7 +63,7 @@ def parse_raw_line(line: str) -> dict[str, Any]:
     if not stripped:
         raise ValueError("empty event line")
     try:
-        value = json.loads(stripped)
+        value = load_json_bounded(stripped)
         if not isinstance(value, dict):
             return {"message": value}
         return value
@@ -47,6 +77,9 @@ def parse_raw_line(line: str) -> dict[str, Any]:
             "message": match.group("msg"),
             "format": "syslog-ish",
         }
+    except ValueError:
+        # Too deep to evaluate safely: keep the line as evidence, never drop it.
+        return {"message": stripped, "format": "json-too-deep"}
 
 
 def normalize(raw: dict[str, Any]) -> NormalizedEvent:

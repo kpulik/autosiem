@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
+from .private_files import create_private
 from .soc_runtime import Investigation
 from .suppression import (
     DEFAULT_CREATED_BY,
@@ -868,6 +869,7 @@ class AutoSIEMStorage(RelationalStorage):
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        create_private(self.db_path)
         self.init_db()
 
     @contextmanager

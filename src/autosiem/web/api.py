@@ -30,6 +30,7 @@ def _csrf_secret() -> str:
 from autosiem.cli import DEMO_EVENTS, load_suppression_engine
 from autosiem.llm import LLMService, config_from_env
 from autosiem.metrics import MetricsRegistry, prometheus_text
+from autosiem.normalization import load_json_bounded
 from autosiem.pipeline import AutoSIEMPipeline
 from autosiem.querygen import translate_query, to_cli_flags
 from autosiem.enrichment import enrichment_from_env
@@ -611,7 +612,8 @@ def _parse_ingest_payload(raw: bytes, content_type: str) -> list[dict[str, Any]]
 
     Supports NDJSON (one JSON object per line) for streamed/agent collectors,
     plus a single JSON object or an array of objects for API clients. Raises
-    ``ValueError`` on any payload that is not valid JSON in a supported shape.
+    ``ValueError`` on any payload that is not valid JSON in a supported shape,
+    or that nests deeper than ``MAX_JSON_DEPTH`` (SEC-016).
     """
     text = raw.decode("utf-8")
     stripped = text.strip()
@@ -623,9 +625,9 @@ def _parse_ingest_payload(raw: bytes, content_type: str) -> list[dict[str, Any]]
             line = line.strip()
             if not line:
                 continue
-            events.append(json.loads(line))
+            events.append(load_json_bounded(line))
         return events
-    data = json.loads(stripped)
+    data = load_json_bounded(stripped)
     if isinstance(data, dict):
         return [data]
     if isinstance(data, list):

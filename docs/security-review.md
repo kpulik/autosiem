@@ -26,10 +26,10 @@ access); both are fixed.
 
 | Status | Findings |
 |---|---|
-| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 015, 018, 019, 020, 021 |
+| **Fixed** | SEC-001, 002, 003, 004, 005 (both), 006, 007, 008, 009, 013, 015, 016, 018, 019, 020, 021 |
 | **Fixed in docs, by design in code** | SEC-012 (TLS belongs to a reverse proxy) |
 | **Partially fixed** | SEC-010 (RAG context now redacted; prompt injection via ingested events is contained by the policy gate, not removed), SEC-011 (two token patterns closed; redaction is still heuristic), SEC-017 (HTTPS enforced; no feed signing or SSRF allow-list yet) |
-| **Open** | SEC-014 (event payloads stored as sent), SEC-016 (deep JSON, file permissions) |
+| **Open** | SEC-014 (event payloads stored as sent) |
 
 The detail sections below are the record of each finding and its fix.
 
@@ -222,6 +222,7 @@ surface.
 | **Location** | `api.py:_parse_ingest_payload` (L316-333), `api_ingest` (L351-355, catches `ValueError` only); `storage.py:DEFAULT_DB_PATH` (L24) / `AutoSIEMStorage.__init__` (L30-33); `rbac.py:save` (L270-271); `threat_intel.py:save_intel_state` (L125-132, atomic) |
 | **Description** | (a) `json.loads` on deeply nested payloads can raise `RecursionError`/`MemoryError`, neither caught here (only `ValueError` at L354), producing a 500 and memory pressure (see SEC-003 for the DoS angle). (b) The SQLite file holds raw events/evidence in cleartext on disk; `rbac_users.json` and the intel state are plaintext JSON with umask-derived permissions (commonly `0644`). On a shared host another local process can read PII. The intel state write is atomic (tmp+rename) — keep that. |
 | **Recommendation** | Catch `RecursionError`; enforce a body-size cap (SEC-003); restrict `data/` + users-file permissions (e.g. `chmod 0600` on `rbac_users.json`); recommend OS full-disk encryption on the host. |
+| **Status** | **Fixed 2026-09-27.** (a) Worse than described: one 5000-deep line made `cli ingest` exit with a traceback and lose every good line in the file, and on `/api/ingest` 900 levels already returned 500 (the web stack's frames pushed the pipeline over the recursion limit). `normalization.load_json_bounded` caps nesting at 64 and turns interpreter recursion into `ValueError`; the API answers 400, the pipeline keeps the line as a `json-too-deep` message event. (b) `private_files.py` creates the users file, intel state, database, archive journal and durable queue 0600; the two rewritten files are replaced atomically so an old 0644 copy is tightened. Existing databases keep their mode (operator choice); `SECURITY.md` gives the `chmod` for older installs. The body cap was already SEC-003. Encryption at rest stays the host's job. Tests: `test_json_depth.py` (11), `test_file_permissions.py` (8). |
 | **Severity** | **Low** |
 
 ### SEC-019 — SQLite tenancy was a column, not a key (fixed 2026-09-15)
@@ -315,7 +316,7 @@ predate the PostgreSQL work and shipped to public main.
 | SEC-013 | Medium | `tenant` stored but unenforced (multi-tenant gap) | `rbac.py:User.tenant` L116; data queries | Thread `tenant` into `search_*`/`list_*`; add cross-tenant isolation test |
 | SEC-014 | Low | Secrets-in-config handled well; event payloads stored as-is; docs hygiene | `llm.py` L66-84; `storage.py` `events.data` | Keep env-only secrets; `.env.example`; document at-rest payload storage |
 | SEC-015 | Low | ~~`/health` leaks db/rules paths~~ **fixed 2026-09-27** | `api.py:health` L135-137 | Return `{"status":"ok"}` only |
-| SEC-016 | Low | Deep/oversized JSON → 500/memory; plaintext at rest + umask perms | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
+| SEC-016 | Low | ~~Deep/oversized JSON → 500/memory; plaintext at rest + umask perms~~ **fixed 2026-09-27** (depth cap 64, owner-only files; encryption at rest is the host's) | `api.py` L316-355; `storage.py` L30; `rbac.py` L271; `threat_intel.py` L125 | Catch `RecursionError`; body cap; `chmod 0600`; full-disk encryption |
 | SEC-017 | Low | ~~Intel refresh allows plaintext fetch~~ **transport fixed 2026-08-10**, extended to both API connectors **2026-09-14**; no signing/SSRF guard yet | `update_job.py:_load_indicators`; `net.py`; `connectors.py` | ~~Enforce `https://`~~ done; sign/pin feed; SSRF guard |
 | Verified clean | — | Search DSL → parameterized SQL (no injection) | `storage.py` L321-393 | Keep `?`-only binding; review rule for future SQL |
 

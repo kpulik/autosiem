@@ -100,6 +100,7 @@ For how companies deploy AutoSIEM and get data into it (agents, agentless connec
 | `listeners.py` | syslog (RFC 5424/3164) + CEF parsers and the zero-dependency UDP `SyslogServer` |
 | `connectors.py` | connector SDK (`BaseConnector` parser/poller/health), registry, and connectors: `file`, `cloudtrail`, `okta`, `github`, `entra`, `sysmon`, `zeek`, `suricata`, `asset`, plus API-native `okta-api`, `github-api`, `entra-api` and `cloudtrail-api` (S3) with persisted cursors and backoff |
 | `net.py` | `require_https`: the single transport rule every remote feed and connector goes through (SEC-017) |
+| `private_files.py` | Owner-only (0600) creation and atomic rewrite for the users file, intel state, database, archive and queue (SEC-016) |
 | `sigv4.py` | AWS Signature Version 4 in the standard library (no boto3), checked against botocore-generated vectors |
 | `kev.py` | CISA Known Exploited Vulnerabilities catalogue: fetched, cached beside the database, feeds the vulnerability enricher |
 | `threat_intel.py` | STIX 2.x bundle loading, indicator state file, `ThreatIntelMatcher` → `AUTO-INTEL-001` findings at pipeline time |
