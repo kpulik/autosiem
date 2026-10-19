@@ -376,7 +376,12 @@ class _FakeSyslogServer:
     def __init__(self, handler, host: str = "127.0.0.1", port: int = 0) -> None:
         self.handler, self.host, self.port = handler, host, port
         self.failures = 0
+        self.failures_by_stage: dict[str, int] = {"parse": 0, "process": 0}
         _FakeSyslogServer.instances.append(self)
+
+    def record_failure(self, stage: str, source, exc: Exception, count: int = 1) -> None:
+        self.failures += count
+        self.failures_by_stage[stage] = self.failures_by_stage.get(stage, 0) + count
 
     def start(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
@@ -534,3 +539,79 @@ def test_batch_size_one_keeps_per_event_processing(capsys, monkeypatch, tmp_path
     assert len(open_storage(db).list_events(limit=1000)) == 40
     assert _incident_count(db) > 1
 
+
+
+# --- batches versus a bounded queue -------------------------------------------
+# DistributedPipeline.run enqueues a batch as a prefix and, if the queue fills
+# part-way, loses the unqueued suffix: with persistence it raises (the whole
+# batch is dropped), with --no-save it truncates and reports success.
+
+
+def _listen_with_queue(capsys, monkeypatch, tmp_path, *, max_pending: int, prefill: int = 0, extra: tuple[str, ...] = ()):
+    import autosiem.cli as cli
+    from autosiem.bus import DurableQueue
+
+    queue_path = tmp_path / "bounded.db"
+    queue = DurableQueue(str(queue_path))
+    for i in range(prefill):
+        queue.push("ingest", {"line": "{}", "seq": i})
+    monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
+    monkeypatch.setenv("AUTOSIEM_QUEUE_MAX_PENDING", str(max_pending))
+    monkeypatch.setattr(cli, "SyslogServer", _BruteForceServer)
+    # Startup replay would drain the pre-filled messages; keep them pending, as
+    # they are when the failures that left them behind are still happening.
+    monkeypatch.setattr(cli.DistributedPipeline, "replay_from_queue", lambda self: {"replayed": 0})
+    monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "b.db"), *extra])
+    main()
+    return DurableQueue(str(queue_path)), capsys.readouterr().err
+
+
+def test_a_batch_larger_than_the_queue_limit_is_processed_in_chunks(capsys, monkeypatch, tmp_path) -> None:
+    queue, err = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=15)
+    assert len(open_storage(tmp_path / "b.db").list_events(limit=1000)) == 40
+    assert queue.pending() == 0
+    assert "could not be parsed or processed" not in err
+
+
+def test_a_full_queue_counts_every_refused_line_instead_of_losing_them_silently(capsys, monkeypatch, tmp_path) -> None:
+    queue, err = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=5, prefill=5)
+    assert len(open_storage(tmp_path / "b.db").list_events(limit=1000)) == 0
+    assert queue.pending() == 5, "the earlier pending messages are untouched"
+    assert "40 line(s) could not be parsed or processed (process 40)" in err
+
+
+def test_no_save_with_a_full_queue_does_not_report_a_silent_success(capsys, monkeypatch, tmp_path) -> None:
+    _queue, err = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=5, prefill=5, extra=("--no-save",))
+    assert "40 line(s) could not be parsed or processed (process 40)" in err
+
+
+@pytest.mark.parametrize("value", ["inf", "-1", "nan", "1e400", "abc", "86400"])
+def test_batch_wait_must_be_a_sane_duration(capsys, monkeypatch, tmp_path, value: str) -> None:
+    import autosiem.cli as cli
+
+    class _NeverStart(_FakeSyslogServer):
+        def start(self) -> None:  # a regression would start a listener; fail instead of serving for ever
+            raise AssertionError("listener started with an invalid argument")
+
+    monkeypatch.setattr(cli, "SyslogServer", _NeverStart)
+    monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--batch-wait", value, "--db", str(tmp_path / "w.db")])
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 2
+    assert "--batch-wait" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["0", "-5", "x"])
+def test_batch_size_must_be_a_positive_integer(capsys, monkeypatch, tmp_path, value: str) -> None:
+    import autosiem.cli as cli
+
+    class _NeverStart(_FakeSyslogServer):
+        def start(self) -> None:  # a regression would start a listener; fail instead of serving for ever
+            raise AssertionError("listener started with an invalid argument")
+
+    monkeypatch.setattr(cli, "SyslogServer", _NeverStart)
+    monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--batch-size", value, "--db", str(tmp_path / "s.db")])
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 2
+    assert "--batch-size" in capsys.readouterr().err

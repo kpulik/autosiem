@@ -141,6 +141,16 @@ class DistributedPipeline:
             return OpenSearchBackend(**kwargs)
         return None
 
+    def queue_room(self) -> int | None:
+        """How many more lines the durable queue will accept, or None if unbounded.
+
+        ``run`` enqueues every line of a call before processing any, so a caller
+        with more lines than this must split them or it loses the suffix.
+        """
+        if self._queue is None:
+            return None
+        return max(0, self.config.queue_max_pending - self._queue.pending())
+
     def process_lines(self, lines: list[str]) -> dict[str, Any]:
         """Run the pipeline and return count summary. See :meth:`run`."""
         result = self.run(lines)

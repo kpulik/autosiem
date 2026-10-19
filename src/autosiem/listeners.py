@@ -191,6 +191,10 @@ def line_to_raw(line: str) -> dict[str, Any]:
     return syslog
 
 
+#: Longest a batch may wait to fill. Also the bound `--batch-wait` accepts.
+MAX_BATCH_WAIT_SECONDS = 3600.0
+
+
 class BatchingHandler:
     """Collect parsed events and hand them to ``process`` in batches.
 
@@ -217,7 +221,9 @@ class BatchingHandler:
         self._process = process
         self._on_failure = on_failure
         self.max_batch = max(1, max_batch)
-        self.max_wait = max_wait
+        # Condition.wait raises OverflowError for a huge timeout and blocks on
+        # NaN; either killed the flusher thread and stranded buffered events.
+        self.max_wait = 0.0 if not (max_wait > 0) else min(max_wait, MAX_BATCH_WAIT_SECONDS)
         self._buffer: list[dict[str, Any]] = []
         self._first_at = 0.0
         self._closed = False
@@ -270,7 +276,12 @@ class BatchingHandler:
             try:
                 self._process(batch)
             except Exception as exc:
-                self._on_failure(exc, len(batch))
+                try:
+                    self._on_failure(exc, len(batch))
+                except Exception:
+                    # A broken callback must not kill the only thread that
+                    # drains the buffer: every later batch would be stranded.
+                    _LOG.exception("batch failure callback raised; %d line(s) not counted", len(batch))
 
 
 class SyslogServer:
