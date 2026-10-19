@@ -304,9 +304,14 @@ class SyslogServer:
                 if not line.strip():
                     continue
                 if self._executor:
-                    self._executor.submit(self._process_line, line, address)
-                else:
-                    self._process_line(line, address)
+                    try:
+                        self._executor.submit(self._process_line, line, address)
+                        continue
+                    except RuntimeError:
+                        # The pool was shut down mid-datagram. Handle the line
+                        # here rather than lose it uncounted.
+                        pass
+                self._process_line(line, address)
 
     def stop(self) -> None:
         self._running.clear()
@@ -315,6 +320,10 @@ class SyslogServer:
                 self._socket.close()
             except OSError:
                 pass
+        # Let the receiver finish handing off the datagram it is on before the
+        # pool closes; closing first made the rest of its lines vanish.
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout=5)
         if self._executor is not None:
             # Wait for lines already handed to workers. Python joins these
             # threads at exit anyway, so this changes no timing; it makes
@@ -323,8 +332,6 @@ class SyslogServer:
             # cannot wait on itself.
             in_worker = threading.current_thread().name.startswith("syslog-worker")
             self._executor.shutdown(wait=not in_worker)
-        if self._thread is not None and self._thread is not threading.current_thread():
-            self._thread.join(timeout=2)
 
     @property
     def address(self) -> tuple[str, int]:

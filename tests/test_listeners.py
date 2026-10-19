@@ -322,3 +322,66 @@ def test_stop_waits_for_queued_lines_so_failures_is_final() -> None:
         server._executor.submit(server._process_line, "x", ("203.0.113.9", 514))
     server.stop()
     assert server.failures == 12
+
+
+def test_stop_never_discards_lines_mid_handoff() -> None:
+    """stop() shut the executor down before joining the receiver, so a
+    multi-line datagram still being handed off hit RuntimeError on submit and
+    its remaining lines vanished, neither handled nor counted."""
+    handled: list[dict] = []
+    lock = threading.Lock()
+
+    def handler(raw: dict) -> None:
+        with lock:
+            handled.append(raw)
+
+    server = SyslogServer(handler, host="127.0.0.1", port=0)
+    server.start()
+    assert server._executor is not None
+    real_submit = server._executor.submit
+    handing_off = threading.Event()
+
+    def slow_submit(fn, *args, **kwargs):
+        handing_off.set()
+        threading.Event().wait(0.01)  # a long datagram takes a while to hand off
+        return real_submit(fn, *args, **kwargs)
+
+    server._executor.submit = slow_submit  # type: ignore[method-assign]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        payload = "\n".join(f"<13>Aug  5 09:30:00 vpn-1 app[1]: line {i}" for i in range(50)).encode()
+        sock.sendto(payload, server.address)
+        assert handing_off.wait(timeout=5)
+        server.stop()
+    finally:
+        sock.close()
+    assert len(handled) + server.failures == 50
+    assert len(handled) == 50
+
+
+def test_a_line_the_pool_refuses_is_handled_by_the_receiver() -> None:
+    """Backstop for a stop() whose join times out: a refused handoff must not lose the line."""
+    handled: list[dict] = []
+    done = threading.Event()
+
+    def handler(raw: dict) -> None:
+        handled.append(raw)
+        if len(handled) == 3:
+            done.set()
+
+    server = SyslogServer(handler, host="127.0.0.1", port=0)
+    server.start()
+    assert server._executor is not None
+
+    def refuse(*_args, **_kwargs):
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    server._executor.submit = refuse  # type: ignore[method-assign]
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(b"one\ntwo\nthree", server.address)
+        assert done.wait(timeout=5)
+    finally:
+        sock.close()
+        server.stop()
+    assert [raw["message"] for raw in handled] == ["one", "two", "three"]
