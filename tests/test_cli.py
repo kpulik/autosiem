@@ -390,12 +390,18 @@ class _FakeSyslogServer:
         return None
 
 
-def test_listener_never_runs_the_pipeline_concurrently(capsys, monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize("with_queue", [False, True], ids=["plain", "queue"])
+def test_listener_never_runs_the_pipeline_concurrently(capsys, monkeypatch, tmp_path, with_queue: bool) -> None:
     """The pipeline's baseline, SOAR planner and baseline snapshot are shared
-    mutable state; 4 concurrent workers lost about 1 event in 300."""
+    mutable state; 4 concurrent workers lost about 1 event in 300. The queue
+    case goes through DistributedPipeline.run, the path this fix is for."""
     import threading
 
     import autosiem.cli as cli
+
+    queue_path = tmp_path / "listen-queue.db"
+    if with_queue:
+        monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
 
     active = {"now": 0, "max": 0}
     guard = threading.Lock()
@@ -418,6 +424,11 @@ def test_listener_never_runs_the_pipeline_concurrently(capsys, monkeypatch, tmp_
     _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(db))
     assert active["max"] == 1
     assert len(open_storage(db).list_events(limit=100)) == 24
+    if with_queue:
+        from autosiem.bus import DurableQueue
+
+        queue = DurableQueue(str(queue_path))
+        assert len(queue) == 24 and queue.pending() == 0
 
 
 def test_listener_reports_its_failure_count_on_exit(capsys, monkeypatch, tmp_path) -> None:
@@ -426,10 +437,56 @@ def test_listener_reports_its_failure_count_on_exit(capsys, monkeypatch, tmp_pat
     class _Failing(_FakeSyslogServer):
         def start(self) -> None:
             self.failures = 3
+            self.failures_by_stage = {"parse": 2, "process": 1}
             raise KeyboardInterrupt
 
     monkeypatch.setattr(cli, "SyslogServer", _Failing)
     monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "f.db")])
     main()
     err = capsys.readouterr().err
-    assert "3 line(s) could not be parsed or processed" in err
+    assert "3 line(s) could not be parsed or processed (parse 2, process 1)" in err
+    assert "not every one was logged" in err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_sigterm_stops_the_listener_cleanly_and_prints_the_summary(tmp_path) -> None:
+    """docker stop and systemd send SIGTERM; its default skipped `finally`, so
+    the listener exited mid-backlog with no failure summary."""
+    import signal
+    import socket
+    import subprocess
+    import time
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    import os
+
+    import autosiem
+
+    # Run the same autosiem the test imported, not whatever is on disk at ROOT.
+    package_root = Path(autosiem.__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(package_root), "PYTHONUNBUFFERED": "1"}
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "autosiem.cli", "listen", "--host", "127.0.0.1", "--port", str(port),
+         "--rules", str(RULES_DIR), "--db", str(tmp_path / "term.db")],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    try:
+        assert proc.stdout is not None
+        deadline = time.monotonic() + 20
+        while "Listening" not in proc.stdout.readline():
+            assert time.monotonic() < deadline and proc.poll() is None, "listener did not start"
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+            for _ in range(3):
+                sender.sendto(b"<13>Oct 99 25:61:61 host x", ("127.0.0.1", port))
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGTERM)
+        _out, err = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    assert proc.returncode == 0, err
+    assert "3 line(s) could not be parsed or processed (parse 3)" in err
+

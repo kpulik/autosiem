@@ -258,7 +258,15 @@ CLI ingest/listen
   → Backend storage (SQLite/ClickHouse/OpenSearch)
 ```
 
-When `AUTOSIEM_QUEUE_PATH` is set, a message is acknowledged only after its result is saved, so an event already in the queue survives a crash (until 2026-10 the listener silently lost every event when a queue was set). With `--no-save` nothing is saved, so messages are acknowledged once processed and nothing is replayable. For `cli listen` that protection starts when a worker picks the datagram up: datagrams still waiting in the listener's in-memory backlog are lost if the process is killed, and a burst faster than processing builds that backlog. They are replayed when `cli listen` starts or when you run `cli distributed --replay`, at most 1000 messages per run; `cli ingest` does not replay. Nothing compacts the queue automatically: acknowledged rows are kept, one per event, so a long-running listener's queue keeps growing. `DurableQueue(path).compact()` removes every acknowledged row and never a pending one; SQLite reuses the freed space, but the file only shrinks after `VACUUM`. There is no CLI command for it yet. When `AUTOSIEM_ARCHIVE_PATH` is set, every raw event is journaled before processing for forensic replay.
+What the queue and archive guarantee, and what they do not:
+
+- With `AUTOSIEM_QUEUE_PATH` set, a message is acknowledged only after its result is saved, so an event already in the queue survives a crash. Until 2026-10 the listener silently lost every event when a queue was set. With `--no-save` nothing is saved, so messages are acknowledged once processed and nothing is replayable.
+- Unacknowledged messages are replayed when `cli listen` starts or when you run `cli distributed --replay`, at most 1000 per run. `cli ingest` does not replay.
+- For `cli listen`, that protection starts when a line is pushed to the queue, which happens in the listener's processing step, one line at a time. Lines received but not yet processed sit in memory. `SIGTERM` (`docker stop`, systemd) or Ctrl+C finishes them and prints a failure total. A crash or `kill -9` loses them, and a burst faster than processing builds that backlog.
+- Processing is one line at a time, so `cli listen --llm` waits on the model for every event. Its throughput is roughly one event per model response time.
+- Nothing compacts the queue automatically. Acknowledged rows are kept, one per event, so a long-running listener's queue keeps growing. `DurableQueue(path).compact()` removes every acknowledged row and never a pending one. SQLite reuses the freed space, but the file only shrinks after `VACUUM`. There is no CLI command for it yet.
+
+When `AUTOSIEM_ARCHIVE_PATH` is set, every raw event is journaled before processing for forensic replay.
 
 ## Okta, API-native (`okta-api`)
 
