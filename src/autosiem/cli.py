@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -1024,7 +1025,13 @@ def _run_listener(args: argparse.Namespace) -> None:
                 f"host={event.host or '-'} user={event.user or '-'} findings={finding_count}"
             )
 
+    def _terminate(_signum: int, _frame: Any) -> None:
+        # docker stop and systemd send SIGTERM, whose default skips `finally`:
+        # no orderly stop and no failure summary.
+        raise KeyboardInterrupt
+
     server = SyslogServer(handle, host=args.host, port=args.port)
+    previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
     try:
         server.start()
         print(f"Listening for syslog/CEF on udp://{args.host}:{server.port} — Ctrl+C to stop")
@@ -1033,9 +1040,15 @@ def _run_listener(args: argparse.Namespace) -> None:
     except KeyboardInterrupt:
         print("\nListener stopped.")
     finally:
+        signal.signal(signal.SIGTERM, previous_sigterm)
         server.stop()
         if server.failures:
-            print(f"{server.failures} line(s) could not be parsed or processed; see the warnings above", file=sys.stderr)
+            by_stage = ", ".join(f"{stage} {count}" for stage, count in sorted(server.failures_by_stage.items()) if count)
+            print(
+                f"{server.failures} line(s) could not be parsed or processed ({by_stage}); "
+                "warnings are rate-limited, so not every one was logged",
+                file=sys.stderr,
+            )
 
 
 def load_suppression_engine(store: RelationalStorage, tenant_id: str | None = None) -> SuppressionEngine | None:

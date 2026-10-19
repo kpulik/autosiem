@@ -244,7 +244,32 @@ def test_a_flood_of_failures_is_rate_limited_and_counted(monkeypatch, caplog) ->
     assert server.failures == 1001
     assert len(messages) == 2
     assert "(1 failures so far)" in messages[0]
-    assert "(1001 failures so far; 999 more not shown)" in messages[1]
+    assert "(1001 failures so far; 999 more like this not shown)" in messages[1]
+    assert server.failures_by_stage == {"parse": 0, "process": 1001}
+
+
+def test_a_parse_flood_cannot_hide_the_first_storage_failure(monkeypatch, caplog) -> None:
+    """The limiter was one timer for everything, so a sender spraying
+    unparseable lines suppressed every 'database is locked' warning."""
+    import logging
+
+    import autosiem.listeners as listeners
+
+    def picky_parse(line: str) -> dict:
+        if line == "junk":
+            raise ValueError("day is out of range for month")
+        return {"message": line}
+
+    server, clock = _failing_server(monkeypatch)
+    monkeypatch.setattr(listeners, "line_to_raw", picky_parse)
+    with caplog.at_level(logging.WARNING, logger="autosiem.listeners"):
+        for _ in range(500):
+            server._process_line("junk", ("198.51.100.66", 514))
+        server._process_line("a real event", ("203.0.113.9", 514))
+    messages = [r.getMessage() for r in caplog.records if r.name == "autosiem.listeners"]
+    assert len(messages) == 2
+    assert "could not process" in messages[1] and "database is locked" in messages[1]
+    assert server.failures_by_stage == {"parse": 500, "process": 1}
 
 
 def test_a_parse_failure_is_reported_as_parse_and_skips_the_handler(monkeypatch, caplog) -> None:

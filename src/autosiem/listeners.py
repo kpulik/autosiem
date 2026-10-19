@@ -219,15 +219,19 @@ class SyslogServer:
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
-        #: Lines that could not be parsed or processed. Warnings are rate-limited
-        #: to one per ``warn_interval`` seconds, carrying a count of the lines
-        #: they stand for: any sender can make every line fail, and one stderr
-        #: line per datagram let a flood fill an undrained pipe and stall workers.
+        #: Lines that could not be parsed or processed, in total and per stage.
+        #: Warnings are rate-limited to one per ``warn_interval`` seconds for
+        #: each (stage, error type), carrying a count of the lines they stand
+        #: for: any sender can make every line fail, and one stderr line per
+        #: datagram let a flood fill an undrained pipe and stall workers. The
+        #: limit is per kind so a flood of unparseable lines cannot hide the
+        #: first storage failure.
         self.failures = 0
+        self.failures_by_stage: dict[str, int] = {"parse": 0, "process": 0}
         self.warn_interval = warn_interval
         self._failures_lock = threading.Lock()
-        self._last_warning: float | None = None
-        self._suppressed = 0
+        self._last_warning: dict[tuple[str, str], float] = {}
+        self._suppressed: dict[tuple[str, str], int] = {}
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -259,15 +263,18 @@ class SyslogServer:
             self._record_failure("process", addr, exc)
 
     def _record_failure(self, stage: str, addr: tuple[str, int], exc: Exception) -> None:
+        key = (stage, type(exc).__name__)
         with self._failures_lock:
             self.failures += 1
+            self.failures_by_stage[stage] = self.failures_by_stage.get(stage, 0) + 1
             total = self.failures
             now = time.monotonic()
-            if self._last_warning is not None and now - self._last_warning < self.warn_interval:
-                self._suppressed += 1
+            last = self._last_warning.get(key)
+            if last is not None and now - last < self.warn_interval:
+                self._suppressed[key] = self._suppressed.get(key, 0) + 1
                 return
-            suppressed, self._suppressed = self._suppressed, 0
-            self._last_warning = now
+            suppressed = self._suppressed.pop(key, 0)
+            self._last_warning[key] = now
         # Logged outside the lock. The line itself is never logged, and the
         # exception text is escaped because it can quote untrusted event data.
         _LOG.warning(
@@ -277,7 +284,7 @@ class SyslogServer:
             type(exc).__name__,
             _printable(str(exc)),
             total,
-            f"; {suppressed} more not shown" if suppressed else "",
+            f"; {suppressed} more like this not shown" if suppressed else "",
         )
 
     def _serve(self) -> None:
