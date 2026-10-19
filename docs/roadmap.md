@@ -79,7 +79,7 @@ See `docs/deployment-and-collection.md` for how companies deploy AutoSIEM and ge
 - [x] Durable queue + backpressure — `autosiem.bus.DurableQueue` (SQLite FIFO with `push`/`ack`/`pending`); wired into `cli ingest`/`listen` via `AUTOSIEM_QUEUE_PATH` env var.
 - [x] Parser workers — `autosiem.workers.ParserWorkerPool`; wired via `AUTOSIEM_WORKERS` env var.
 - [x] Object archive — `autosiem.archive` (append-only `JournalFile`, `ArchiveWriter`); wired via `AUTOSIEM_ARCHIVE_PATH` env var.
-- [x] Backpressure and replay — `DurableQueue` enforces `max_pending`, replays unacked messages on restart; wired into distributed pipeline.
+- [x] Backpressure and replay — `DurableQueue` enforces `max_pending`; unacked messages replay when `cli listen` starts or on `cli distributed --replay` (1000 per run); wired into distributed pipeline. The listener path lost every event with a queue set until 2026-10 (thread-affinity bug, now fixed).
 - [x] ClickHouse/OpenSearch storage — `autosiem.backends` (`EventBackend` + `make_backend`); configurable via `AUTOSIEM_BACKEND` env var.
 - [x] Storage ports for the future control plane and event-query implementations (`autosiem.storage_ports`); SQLite explicitly satisfies the initial contracts.
 - [x] Optional PostgreSQL control plane and transactional event outbox: explicit forward migrations, idempotent projection contracts, replay/lag reporting, and real PostgreSQL concurrency tests. Production HA, raw archive recovery, and live external projection-cluster verification remain open; see [deployment guide](postgresql.md).

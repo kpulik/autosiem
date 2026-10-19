@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import json
 import os
+import sys
+import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
@@ -1002,11 +1004,19 @@ def _run_listener(args: argparse.Namespace) -> None:
         if replay_result.get("replayed", 0) > 0:
             print(f"Replayed {replay_result['replayed']} events from queue")
 
+    # SyslogServer calls handle() from its worker pool, but the pipeline is not
+    # thread-safe: the behavioral baseline, the SOAR planner and the baseline
+    # snapshot are shared mutable state (concurrent runs lost about 1 event in
+    # 300 to "dictionary changed size during iteration"). Parsing stays parallel;
+    # processing and saving run one line at a time.
+    process_lock = threading.Lock()
+
     def handle(raw: dict[str, Any]) -> None:
         line = json.dumps(raw)
-        result = dist_pipeline.run([line]) if dist_pipeline else pipeline.process_lines([line])
-        if store and dist_pipeline is None:
-            store.save_pipeline_result(result)
+        with process_lock:
+            result = dist_pipeline.run([line]) if dist_pipeline else pipeline.process_lines([line])
+            if store and dist_pipeline is None:
+                store.save_pipeline_result(result)
         for event in result.events:
             finding_count = sum(1 for finding in result.findings if finding.event_id == event.event_id)
             print(
@@ -1024,6 +1034,8 @@ def _run_listener(args: argparse.Namespace) -> None:
         print("\nListener stopped.")
     finally:
         server.stop()
+        if server.failures:
+            print(f"{server.failures} line(s) could not be parsed or processed; see the warnings above", file=sys.stderr)
 
 
 def load_suppression_engine(store: RelationalStorage, tenant_id: str | None = None) -> SuppressionEngine | None:

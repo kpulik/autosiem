@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -107,13 +108,18 @@ class DurableQueue:
 
     Rows are append-only, each with a monotonically increasing ``offset``. A
     message is ``acked`` once consumed; un-acked rows form the replay set.
+
+    Safe to share across threads. ``cli listen`` builds the queue on the main
+    thread and pushes from its syslog worker pool; a default sqlite3 connection
+    refuses that, and every event was lost. One connection, one lock.
     """
 
     def __init__(self, path: str) -> None:
         self.path = str(path)
         if self.path != ":memory:" and not self.path.startswith("file:"):
             create_private(self.path)
-        self._conn = sqlite3.connect(self.path)
+        self._lock = threading.RLock()
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS messages (
@@ -129,19 +135,22 @@ class DurableQueue:
 
     def _insert(self, topic: str, payload: Any) -> int:
         created_at = datetime.now(timezone.utc).isoformat()
-        cursor = self._conn.execute(
-            "INSERT INTO messages (topic, payload, created_at) VALUES (?, ?, ?)",
-            (topic, json.dumps(payload), created_at),
-        )
-        self._conn.commit()
-        return int(cursor.lastrowid or 0)
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT INTO messages (topic, payload, created_at) VALUES (?, ?, ?)",
+                (topic, json.dumps(payload), created_at),
+            )
+            self._conn.commit()
+            return int(cursor.lastrowid or 0)
 
     def push(self, topic: str, payload: Any, max_pending: int | None = None) -> int:
-        if max_pending is not None and self.pending() >= max_pending:
-            raise QueueFullError(
-                f"queue overflow: {self.pending()} >= {max_pending} pending"
-            )
-        return self._insert(topic, payload)
+        # Check and insert under one lock, or racing threads all pass the check.
+        with self._lock:
+            if max_pending is not None:
+                pending = self.pending()
+                if pending >= max_pending:
+                    raise QueueFullError(f"queue overflow: {pending} >= {max_pending} pending")
+            return self._insert(topic, payload)
 
     @staticmethod
     def _decode(row: tuple) -> dict[str, Any]:
@@ -149,31 +158,36 @@ class DurableQueue:
         return {"offset": offset, "topic": topic, "payload": json.loads(payload)}
 
     def pull(self, limit: int = 100) -> list[dict]:
-        rows = self._conn.execute(
-            "SELECT offset, topic, payload, acked, created_at FROM messages "
-            "WHERE acked = 0 ORDER BY offset ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT offset, topic, payload, acked, created_at FROM messages "
+                "WHERE acked = 0 ORDER BY offset ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
         return [self._decode(row) for row in rows]
 
     def ack(self, offset: int) -> None:
-        self._conn.execute("UPDATE messages SET acked = 1 WHERE offset = ?", (offset,))
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("UPDATE messages SET acked = 1 WHERE offset = ?", (offset,))
+            self._conn.commit()
 
     def pending(self) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM messages WHERE acked = 0"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE acked = 0"
+            ).fetchone()
         return int(row[0])
 
     def checkpoint(self) -> int:
-        row = self._conn.execute(
-            "SELECT COALESCE(MAX(offset), 0) FROM messages WHERE acked = 1"
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(offset), 0) FROM messages WHERE acked = 1"
+            ).fetchone()
         return int(row[0])
 
     def __len__(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM messages").fetchone()
         return int(row[0])
 
     def __bool__(self) -> bool:
@@ -187,16 +201,27 @@ class DurableQueue:
 
     def replay(self, offset: int | None = None) -> list[dict]:
         start = int(offset or 0)
-        rows = self._conn.execute(
-            "SELECT offset, topic, payload, acked, created_at FROM messages "
-            "WHERE acked = 0 AND offset >= ? ORDER BY offset ASC",
-            (start,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT offset, topic, payload, acked, created_at FROM messages "
+                "WHERE acked = 0 AND offset >= ? ORDER BY offset ASC",
+                (start,),
+            ).fetchall()
         return [self._decode(row) for row in rows]
 
-    def compact(self, max_acked: int = 1000) -> int:
-        cursor = self._conn.execute(
-            "DELETE FROM messages WHERE offset <= ?", (max_acked,)
-        )
-        self._conn.commit()
-        return int(cursor.rowcount)
+    def compact(self, max_acked: int | None = None) -> int:
+        """Delete acknowledged rows, all of them or those at or below offset
+        ``max_acked``; never a pending one.
+
+        Acks arrive out of order once several threads push, so a pending
+        message can sit below the highest acked offset (``checkpoint()``).
+        SQLite reuses the freed pages; the file itself does not shrink
+        without ``VACUUM``.
+        """
+        ceiling = -1 if max_acked is None else max_acked
+        with self._lock:
+            cursor = self._conn.execute(
+                "DELETE FROM messages WHERE acked = 1 AND (? < 0 OR offset <= ?)", (ceiling, ceiling)
+            )
+            self._conn.commit()
+            return int(cursor.rowcount)
