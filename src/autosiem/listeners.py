@@ -13,6 +13,7 @@ real-world syslog/CEF feeds — no full protocol state machine.
 """
 from __future__ import annotations
 
+import logging
 import re
 import socket
 import threading
@@ -20,6 +21,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
+
+_LOG = logging.getLogger(__name__)
 
 _CEF_RE = re.compile(
     r"^CEF:(?P<version>\d+)\|(?P<vendor>[^|]*)\|(?P<product>[^|]*)\|(?P<product_version>[^|]*)\|"
@@ -197,6 +200,7 @@ class SyslogServer:
         buffer_size: int = 65536,
         allowed_hosts: set[str] | list[str] | None = None,
         max_workers: int = 4,
+        warn_interval: float = 10.0,
     ) -> None:
         self.handler = handler
         self.host = host
@@ -208,6 +212,15 @@ class SyslogServer:
         self._socket: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._running = threading.Event()
+        #: Lines that could not be parsed or processed. Warnings are rate-limited
+        #: to one per ``warn_interval`` seconds, carrying a count of the lines
+        #: they stand for: any sender can make every line fail, and one stderr
+        #: line per datagram let a flood fill an undrained pipe and stall workers.
+        self.failures = 0
+        self.warn_interval = warn_interval
+        self._failures_lock = threading.Lock()
+        self._last_warning: float | None = None
+        self._suppressed = 0
 
     def start(self) -> None:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -221,14 +234,43 @@ class SyslogServer:
         self._thread.start()
 
     def _process_line(self, line: str, addr: tuple[str, int]) -> None:
+        # Both stages used to sit under a bare `except Exception: pass`: with
+        # AUTOSIEM_QUEUE_PATH set every event failed and the listener still
+        # looked healthy. Whether a failed event was stored depends on where the
+        # handler failed, so the warning says "could not process", not "dropped".
         try:
             raw = line_to_raw(line)
-            # Annotate with source IP if missing
-            if isinstance(raw, dict) and "src_ip" not in raw and addr:
-                raw["src_ip"] = addr[0]
+        except Exception as exc:
+            self._record_failure("parse", addr, exc)
+            return
+        # Annotate with source IP if missing
+        if isinstance(raw, dict) and "src_ip" not in raw and addr:
+            raw["src_ip"] = addr[0]
+        try:
             self.handler(raw)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_failure("process", addr, exc)
+
+    def _record_failure(self, stage: str, addr: tuple[str, int], exc: Exception) -> None:
+        with self._failures_lock:
+            self.failures += 1
+            total = self.failures
+            now = time.monotonic()
+            if self._last_warning is not None and now - self._last_warning < self.warn_interval:
+                self._suppressed += 1
+                return
+            suppressed, self._suppressed = self._suppressed, 0
+            self._last_warning = now
+        # Logged outside the lock, and never the line itself (untrusted input).
+        _LOG.warning(
+            "listener could not %s a line from %s: %s: %s (%d failures so far%s)",
+            stage,
+            addr[0] if addr else "?",
+            type(exc).__name__,
+            str(exc).replace("\n", " ")[:300],
+            total,
+            f"; {suppressed} more not shown" if suppressed else "",
+        )
 
     def _serve(self) -> None:
         assert self._socket is not None

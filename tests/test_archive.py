@@ -79,3 +79,13 @@ def test_archive_writer_without_queue(tmp_path) -> None:
     writer.write({"k": "v"})
     assert journal.read_all() == [{"k": "v"}]
     assert writer.replay_from_checkpoint() == [{"k": "v"}]
+
+def test_concurrent_appends_get_distinct_sequence_numbers(tmp_path) -> None:
+    """The listener appends from several worker threads; seq is read-then-write."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    journal = JournalFile(str(tmp_path / "archive.jsonl"))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        seqs = list(pool.map(lambda i: journal.append({"i": i}), range(200)))
+    assert sorted(seqs) == list(range(200))
+    assert sorted(entry["seq"] for entry in list_archived(journal.path)) == list(range(200))

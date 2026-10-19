@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from typing import Any
 
 from .private_files import create_private
@@ -22,6 +23,8 @@ class JournalFile:
 
     def __init__(self, path: str) -> None:
         self.path = str(path)
+        # seq is read-then-written; the listener appends from several threads.
+        self._lock = threading.Lock()
 
     def _entries(self) -> list[dict[str, Any]]:
         if not os.path.exists(self.path):
@@ -38,13 +41,14 @@ class JournalFile:
         return len(self._entries())
 
     def append(self, record: Any, seq: int | None = None) -> int:
-        if seq is None:
-            seq = self.sequence()
-        line = json.dumps({"seq": seq, "record": record})
-        create_private(self.path)
-        with open(self.path, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
-        return seq
+        with self._lock:
+            if seq is None:
+                seq = self.sequence()
+            line = json.dumps({"seq": seq, "record": record})
+            create_private(self.path)
+            with open(self.path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+            return seq
 
     def read_all(self) -> list[dict[str, Any]]:
         """All records in insertion order."""

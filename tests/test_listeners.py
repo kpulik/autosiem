@@ -174,3 +174,94 @@ def test_parse_syslog_server_udp_end_to_end() -> None:
     finally:
         sock.close()
         server.stop()
+
+
+def test_a_failing_handler_is_logged_and_counted_not_swallowed(caplog) -> None:
+    """A handler error used to vanish (`except Exception: pass`), so a listener
+    that stored nothing looked healthy. One line per failure, and the listener
+    keeps serving."""
+    import logging
+
+    seen: list[dict] = []
+    done = threading.Event()
+
+    def handler(raw: dict) -> None:
+        if "boom" in raw.get("message", ""):
+            raise RuntimeError("database is locked")
+        seen.append(raw)
+        done.set()
+
+    server = SyslogServer(handler, host="127.0.0.1", port=0)
+    server.start()
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with caplog.at_level(logging.WARNING, logger="autosiem.listeners"):
+            sock.sendto(b"boom one", server.address)
+            sock.sendto(b"<13>Aug  5 09:30:00 vpn-1 sshd[1]: ok", server.address)
+            assert done.wait(timeout=5)
+            # The worker counts the failure and then logs it, so wait for the
+            # log record itself, not the counter (that order flaked ~3%).
+            pause = threading.Event()
+            messages: list[str] = []
+            for _ in range(100):
+                messages = [record.getMessage() for record in caplog.records if record.name == "autosiem.listeners"]
+                if messages:
+                    break
+                pause.wait(0.05)
+        assert server.failures == 1
+        assert seen and seen[0]["host"] == "vpn-1"
+        assert any("RuntimeError: database is locked" in message for message in messages), messages
+        assert all("\n" not in message for message in messages)
+    finally:
+        sock.close()
+        server.stop()
+
+
+def _failing_server(monkeypatch, *, warn_interval: float = 10.0) -> tuple[SyslogServer, list[float]]:
+    import autosiem.listeners as listeners
+
+    clock = [100.0]
+    monkeypatch.setattr(listeners.time, "monotonic", lambda: clock[0])
+
+    def handler(raw: dict) -> None:
+        raise RuntimeError("database is locked")
+
+    return SyslogServer(handler, warn_interval=warn_interval), clock
+
+
+def test_a_flood_of_failures_is_rate_limited_and_counted(monkeypatch, caplog) -> None:
+    """Any sender can make every line fail. One stderr line per datagram let a
+    flood fill an undrained pipe and stall every worker."""
+    import logging
+
+    server, clock = _failing_server(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="autosiem.listeners"):
+        for _ in range(1000):
+            server._process_line("x", ("203.0.113.9", 514))
+        clock[0] += 11
+        server._process_line("x", ("203.0.113.9", 514))
+    messages = [r.getMessage() for r in caplog.records if r.name == "autosiem.listeners"]
+    assert server.failures == 1001
+    assert len(messages) == 2
+    assert "(1 failures so far)" in messages[0]
+    assert "(1001 failures so far; 999 more not shown)" in messages[1]
+
+
+def test_a_parse_failure_is_reported_as_parse_and_skips_the_handler(monkeypatch, caplog) -> None:
+    import logging
+
+    import autosiem.listeners as listeners
+
+    def bad_parse(line: str) -> dict:
+        raise ValueError("day is out of range for month")
+
+    called: list[dict] = []
+    monkeypatch.setattr(listeners, "line_to_raw", bad_parse)
+    server = SyslogServer(called.append)
+    with caplog.at_level(logging.WARNING, logger="autosiem.listeners"):
+        server._process_line("<13>Oct 99 25:61:61 host x", ("203.0.113.9", 514))
+    messages = [r.getMessage() for r in caplog.records if r.name == "autosiem.listeners"]
+    assert called == []
+    assert server.failures == 1
+    assert messages and messages[0].startswith("listener could not parse a line from 203.0.113.9: ValueError")
+    assert "25:61:61" not in messages[0], "the untrusted line itself is never logged"

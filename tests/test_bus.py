@@ -125,3 +125,73 @@ def test_durablequeue_compact_deletes_acked(tmp_path) -> None:
     q.compact(max_acked=3)  # remove offsets 1, 2, 3 (all acked)
     assert len(q) == 2
     assert [r["payload"] for r in q.pull()] == [3, 4]
+
+
+def test_compact_never_deletes_a_pending_message_below_the_checkpoint(tmp_path) -> None:
+    """With concurrent workers, offset 3 can be acked while offset 2 is pending."""
+    q = DurableQueue(str(tmp_path / "queue.db"))
+    offsets = [q.push("t", i) for i in range(4)]
+    for offset in (offsets[0], offsets[2], offsets[3]):
+        q.ack(offset)
+
+    removed = q.compact(max_acked=q.checkpoint())
+    assert removed == 3
+    assert [row["payload"] for row in q.pull()] == [1]
+
+
+def test_compact_with_no_ceiling_removes_every_acked_row(tmp_path) -> None:
+    """The old default (max_acked=1000) was an offset ceiling, so a bare
+    compact() on a busy queue removed only the first thousand."""
+    q = DurableQueue(str(tmp_path / "queue.db"))
+    offsets = [q.push("t", i) for i in range(1500)]
+    for offset in offsets[:-1]:
+        q.ack(offset)
+
+    assert q.compact() == 1499
+    assert len(q) == 1 and q.pending() == 1
+
+# --- used from the listener's worker threads ----------------------------------
+# The listener builds the queue on the main thread and pushes from its syslog
+# worker pool. A plain sqlite3 connection refuses that, and the listener
+# swallowed the error, so with AUTOSIEM_QUEUE_PATH set every event was lost.
+
+
+def test_durablequeue_can_be_used_from_another_thread(tmp_path) -> None:
+    import threading
+
+    queue = DurableQueue(str(tmp_path / "q.db"))
+    errors: list[BaseException] = []
+
+    def push() -> None:
+        try:
+            offset = queue.push("ingest", {"line": "x"})
+            queue.ack(offset)
+        except BaseException as exc:  # noqa: BLE001 - the test inspects it
+            errors.append(exc)
+
+    worker = threading.Thread(target=push)
+    worker.start()
+    worker.join(5)
+    assert errors == []
+    assert len(queue) == 1 and queue.pending() == 0
+
+
+def test_concurrent_pushes_get_distinct_offsets_and_respect_capacity(tmp_path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    queue = DurableQueue(str(tmp_path / "q.db"))
+
+    def push(i: int) -> int | None:
+        try:
+            return queue.push("ingest", {"i": i}, max_pending=25)
+        except QueueFullError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        offsets = list(pool.map(push, range(100)))
+    accepted = [offset for offset in offsets if offset is not None]
+    # The capacity check and the insert are one step, so racing threads cannot
+    # all see 24 pending and all insert.
+    assert len(accepted) == 25
+    assert len(set(accepted)) == 25
+    assert queue.pending() == 25

@@ -363,3 +363,73 @@ def test_listener_startup_replay_reports_a_wedged_backend_in_one_line(capsys, mo
         _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "l.db"))
     message = _one_line_backend_failure(excinfo)
     assert "stay pending" in message
+
+
+# --- cli listen: one pipeline, many worker threads ----------------------------
+
+
+class _FakeSyslogServer:
+    """Captures the handler and drives it from 4 threads, then stops the listener."""
+
+    instances: list["_FakeSyslogServer"] = []
+
+    def __init__(self, handler, host: str = "127.0.0.1", port: int = 0) -> None:
+        self.handler, self.host, self.port = handler, host, port
+        self.failures = 0
+        _FakeSyslogServer.instances.append(self)
+
+    def start(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+
+        raws = [{"user": f"u{i}", "action": "login", "host": "h1"} for i in range(24)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(self.handler, raws))
+        raise KeyboardInterrupt  # what Ctrl+C does to the serve loop
+
+    def stop(self) -> None:
+        return None
+
+
+def test_listener_never_runs_the_pipeline_concurrently(capsys, monkeypatch, tmp_path) -> None:
+    """The pipeline's baseline, SOAR planner and baseline snapshot are shared
+    mutable state; 4 concurrent workers lost about 1 event in 300."""
+    import threading
+
+    import autosiem.cli as cli
+
+    active = {"now": 0, "max": 0}
+    guard = threading.Lock()
+    original = cli.AutoSIEMPipeline.process_lines
+
+    def tracking(self, lines):
+        with guard:
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+        try:
+            threading.Event().wait(0.01)  # widen the window a race would need
+            return original(self, lines)
+        finally:
+            with guard:
+                active["now"] -= 1
+
+    monkeypatch.setattr(cli.AutoSIEMPipeline, "process_lines", tracking)
+    monkeypatch.setattr(cli, "SyslogServer", _FakeSyslogServer)
+    db = tmp_path / "listen.db"
+    _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(db))
+    assert active["max"] == 1
+    assert len(open_storage(db).list_events(limit=100)) == 24
+
+
+def test_listener_reports_its_failure_count_on_exit(capsys, monkeypatch, tmp_path) -> None:
+    import autosiem.cli as cli
+
+    class _Failing(_FakeSyslogServer):
+        def start(self) -> None:
+            self.failures = 3
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "SyslogServer", _Failing)
+    monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "f.db")])
+    main()
+    err = capsys.readouterr().err
+    assert "3 line(s) could not be parsed or processed" in err

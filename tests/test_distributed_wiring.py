@@ -228,3 +228,29 @@ def test_postgres_no_save_is_rejected_before_enqueue(tmp_path):
     with pytest.raises(ValueError, match="persistence"):
         pipeline.run(LINES)
     assert DurableQueue(config.queue_path).pending() == 0
+
+
+# --- the listener path: built on the main thread, run from worker threads -----
+
+
+def test_queue_backed_run_works_from_worker_threads(tmp_path) -> None:
+    """`cli listen` builds DistributedPipeline (and its DurableQueue) on the main
+    thread and calls run() from the syslog worker pool. Every push failed with
+    sqlite3.ProgrammingError, which the listener swallowed: 0 events stored."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    persisted: list[int] = []
+    queue_path = tmp_path / "queue.db"
+    dist = DistributedPipeline(
+        DistributedConfig(queue_path=str(queue_path), archive_path=str(tmp_path / "archive.jsonl")),
+        [],
+        db_path=str(tmp_path / "x.db"),
+        pipeline=CountingPipeline(),
+        persist=lambda result: persisted.append(len(result.events)),
+    )
+    lines = [json.dumps({"user": f"u{i}", "action": "login"}) for i in range(40)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda line: dist.run([line]), lines))
+    assert sum(persisted) == 40
+    queue = DurableQueue(str(queue_path))
+    assert queue.pending() == 0, "every ingest message is acknowledged"
