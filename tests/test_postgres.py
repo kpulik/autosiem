@@ -304,6 +304,7 @@ def test_pg_listener_persists_before_queue_ack(pg, pg_dsn, monkeypatch, tmp_path
     class FakeServer:
         def __init__(self, handler, **kwargs):
             self.handler, self.port = handler, 5514
+            self.failures = 0
         def start(self):
             self.handler({"event_id": "syslog-test", "timestamp": "2026-08-04T10:00:00Z", "action": "login_success"})
             assert pg.counts()["events"] == 1
