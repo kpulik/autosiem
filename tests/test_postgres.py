@@ -313,7 +313,8 @@ def test_pg_listener_persists_before_queue_ack(pg, pg_dsn, monkeypatch, tmp_path
         def stop(self):
             pass
     monkeypatch.setattr(cli, "SyslogServer", FakeServer)
-    monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--db", str(tmp_path / "not_created.db")])
+    # --batch-size 1: this test asserts the event is saved the moment the handler returns.
+    monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--batch-size", "1", "--db", str(tmp_path / "not_created.db")])
     cli.main()
     assert pg.outbox_stats("sink")["pending"] == 1
 

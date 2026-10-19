@@ -33,7 +33,7 @@ from .schemas import DetectionRule
 from .sigma import export_rules
 from .sigma_sync import DEFAULT_RULESET, RULESETS, default_sigma_dir, load_synced_rules, merge_rules, sync_rules
 from .connectors import registry
-from .listeners import SyslogServer
+from .listeners import BatchingHandler, SyslogServer
 from .soar import SoarPlanner
 from .threat_intel import ThreatIntelMatcher, default_intel_state, load_intel_state, load_stix_bundle, save_intel_state
 from .update_job import run_update
@@ -167,6 +167,11 @@ def main() -> None:
     listen.add_argument("--host", default="127.0.0.1")
     listen.add_argument("--port", type=int, default=5514, help="UDP port (default 5514; use 514 with sudo)")
     listen.add_argument("--rules", default=str(DEFAULT_RULE_PATH), help="Rule file or directory")
+    listen.add_argument("--batch-size", type=int, default=200,
+                        help="Process events in batches of up to this many so related events share an incident "
+                             "(default 200; 1 handles each event immediately, one incident per event)")
+    listen.add_argument("--batch-wait", type=float, default=1.0,
+                        help="Seconds to wait for a batch to fill before processing it (default 1.0)")
     _add_llm_arg(listen)
     _add_storage_args(listen)
 
@@ -1005,19 +1010,13 @@ def _run_listener(args: argparse.Namespace) -> None:
         if replay_result.get("replayed", 0) > 0:
             print(f"Replayed {replay_result['replayed']} events from queue")
 
-    # SyslogServer calls handle() from its worker pool, but the pipeline is not
-    # thread-safe: the behavioral baseline, the SOAR planner and the baseline
-    # snapshot are shared mutable state (concurrent runs lost about 1 event in
-    # 300 to "dictionary changed size during iteration"). Parsing stays parallel;
-    # processing and saving run one line at a time.
-    process_lock = threading.Lock()
-
-    def handle(raw: dict[str, Any]) -> None:
-        line = json.dumps(raw)
-        with process_lock:
-            result = dist_pipeline.run([line]) if dist_pipeline else pipeline.process_lines([line])
-            if store and dist_pipeline is None:
-                store.save_pipeline_result(result)
+    def process_batch(batch: list[dict[str, Any]]) -> None:
+        # One process_lines call per batch: incidents are built from the findings
+        # of a single call, so only events in the same batch can share one.
+        lines = [json.dumps(raw) for raw in batch]
+        result = dist_pipeline.run(lines) if dist_pipeline else pipeline.process_lines(lines)
+        if store and dist_pipeline is None:
+            store.save_pipeline_result(result)
         for event in result.events:
             finding_count = sum(1 for finding in result.findings if finding.event_id == event.event_id)
             print(
@@ -1025,12 +1024,26 @@ def _run_listener(args: argparse.Namespace) -> None:
                 f"host={event.host or '-'} user={event.user or '-'} findings={finding_count}"
             )
 
+    server: SyslogServer
+
+    def batch_failed(exc: Exception, count: int) -> None:
+        server.record_failure("process", "batch", exc, count=count)
+
+    # SyslogServer calls its handler from a worker pool, but the pipeline is not
+    # thread-safe (its behavioral baseline, SOAR planner and baseline snapshot
+    # are shared mutable state; concurrent runs lost about 1 event in 300). The
+    # BatchingHandler parses in parallel and processes one batch at a time on a
+    # single thread.
+    batcher = BatchingHandler(
+        process_batch, batch_failed, max_batch=args.batch_size, max_wait=args.batch_wait
+    )
+
     def _terminate(_signum: int, _frame: Any) -> None:
         # docker stop and systemd send SIGTERM, whose default skips `finally`:
         # no orderly stop and no failure summary.
         raise KeyboardInterrupt
 
-    server = SyslogServer(handle, host=args.host, port=args.port)
+    server = SyslogServer(batcher, host=args.host, port=args.port)
     previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
     try:
         server.start()
@@ -1042,6 +1055,7 @@ def _run_listener(args: argparse.Namespace) -> None:
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         server.stop()
+        batcher.close()  # after stop(): every line already read is in the buffer
         if server.failures:
             by_stage = ", ".join(f"{stage} {count}" for stage, count in sorted(server.failures_by_stage.items()) if count)
             print(

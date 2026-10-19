@@ -490,3 +490,47 @@ def test_sigterm_stops_the_listener_cleanly_and_prints_the_summary(tmp_path) -> 
     assert proc.returncode == 0, err
     assert "3 line(s) could not be parsed or processed (parse 3)" in err
 
+
+# --- cli listen: related events share an incident ------------------------------
+
+
+class _BruteForceServer(_FakeSyslogServer):
+    """Feeds one user's failed logins to the listener, then stops it."""
+
+    count = 40
+
+    def start(self) -> None:
+        for i in range(self.count):
+            self.handler({
+                "timestamp": f"2026-08-04T10:{i // 60:02d}:{i % 60:02d}Z", "category": "authentication",
+                "action": "login_failed", "outcome": "failure", "user": "mallory", "host": "vpn-1",
+                "src_ip": "198.51.100.25",
+            })
+        raise KeyboardInterrupt
+
+
+def _incident_count(db: Path) -> int:
+    return len(open_storage(db).list_incidents(limit=1000))
+
+
+def test_listener_correlates_a_burst_into_one_incident(capsys, monkeypatch, tmp_path) -> None:
+    """One datagram per process_lines call meant one incident per datagram (1500
+    failed logins for one user gave 1500 incidents)."""
+    import autosiem.cli as cli
+
+    monkeypatch.setattr(cli, "SyslogServer", _BruteForceServer)
+    db = tmp_path / "batched.db"
+    _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(db))
+    assert len(open_storage(db).list_events(limit=1000)) == 40
+    assert _incident_count(db) == 1
+
+
+def test_batch_size_one_keeps_per_event_processing(capsys, monkeypatch, tmp_path) -> None:
+    import autosiem.cli as cli
+
+    monkeypatch.setattr(cli, "SyslogServer", _BruteForceServer)
+    db = tmp_path / "per-event.db"
+    _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--batch-size", "1", "--rules", str(RULES_DIR), "--db", str(db))
+    assert len(open_storage(db).list_events(limit=1000)) == 40
+    assert _incident_count(db) > 1
+
