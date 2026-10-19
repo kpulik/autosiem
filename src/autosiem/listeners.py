@@ -191,6 +191,88 @@ def line_to_raw(line: str) -> dict[str, Any]:
     return syslog
 
 
+class BatchingHandler:
+    """Collect parsed events and hand them to ``process`` in batches.
+
+    ``AutoSIEMPipeline.process_lines`` builds incidents from the findings of one
+    call, so a listener that makes one call per datagram can never correlate:
+    1500 failed logins for one user gave 1500 incidents. A batch is flushed when
+    it holds ``max_batch`` events or ``max_wait`` seconds after its first event,
+    whichever comes first. One thread runs ``process``, so batches are serial,
+    which the pipeline needs (its baseline and planner are not thread-safe).
+
+    ``max_batch <= 1`` is the old behaviour: each event is processed before the
+    call returns, one at a time, and a failure propagates to the caller.
+    Buffered events live in memory until flushed; ``close()`` flushes them.
+    Events in a batch are correlated with each other, not with earlier batches.
+    """
+
+    def __init__(
+        self,
+        process: Callable[[list[dict[str, Any]]], None],
+        on_failure: Callable[[Exception, int], None],
+        max_batch: int = 200,
+        max_wait: float = 1.0,
+    ) -> None:
+        self._process = process
+        self._on_failure = on_failure
+        self.max_batch = max(1, max_batch)
+        self.max_wait = max_wait
+        self._buffer: list[dict[str, Any]] = []
+        self._first_at = 0.0
+        self._closed = False
+        self._cond = threading.Condition()
+        self._sync_lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        if self.max_batch > 1:
+            self._thread = threading.Thread(target=self._run, name="autosiem-batcher", daemon=True)
+            self._thread.start()
+
+    def __call__(self, raw: dict[str, Any]) -> None:
+        if self._thread is None:
+            with self._sync_lock:
+                self._process([raw])
+            return
+        with self._cond:
+            first = not self._buffer
+            if first:
+                self._first_at = time.monotonic()
+            self._buffer.append(raw)
+            # Wake the flusher on the first event (it sleeps while idle, and
+            # needs to start its max_wait clock) and when the batch is full.
+            if first or len(self._buffer) >= self.max_batch:
+                self._cond.notify()
+
+    def close(self) -> None:
+        """Flush everything buffered and stop the thread."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+        if self._thread is not None:
+            self._thread.join()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._buffer and not self._closed:
+                    self._cond.wait()
+                if not self._buffer:
+                    return
+                while len(self._buffer) < self.max_batch and not self._closed:
+                    remaining = self._first_at + self.max_wait - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._cond.wait(remaining)
+                batch = self._buffer[: self.max_batch]
+                del self._buffer[: self.max_batch]
+                if self._buffer:
+                    self._first_at = time.monotonic()
+            try:
+                self._process(batch)
+            except Exception as exc:
+                self._on_failure(exc, len(batch))
+
+
 class SyslogServer:
     """Zero-dependency UDP listener: datagrams -> raw event dicts via a handler.
 
@@ -252,7 +334,7 @@ class SyslogServer:
         try:
             raw = line_to_raw(line)
         except Exception as exc:
-            self._record_failure("parse", addr, exc)
+            self.record_failure("parse", addr, exc)
             return
         # Annotate with source IP if missing
         if isinstance(raw, dict) and "src_ip" not in raw and addr:
@@ -260,18 +342,24 @@ class SyslogServer:
         try:
             self.handler(raw)
         except Exception as exc:
-            self._record_failure("process", addr, exc)
+            self.record_failure("process", addr, exc)
 
-    def _record_failure(self, stage: str, addr: tuple[str, int], exc: Exception) -> None:
+    def record_failure(self, stage: str, source: tuple[str, int] | str, exc: Exception, count: int = 1) -> None:
+        """Count ``count`` failed lines and warn, rate-limited per (stage, error type).
+
+        ``source`` is the sender's ``(ip, port)``, or a label such as ``"batch"``
+        for lines whose senders are no longer known.
+        """
+        addr = source if isinstance(source, tuple) else (source, 0)
         key = (stage, type(exc).__name__)
         with self._failures_lock:
-            self.failures += 1
-            self.failures_by_stage[stage] = self.failures_by_stage.get(stage, 0) + 1
+            self.failures += count
+            self.failures_by_stage[stage] = self.failures_by_stage.get(stage, 0) + count
             total = self.failures
             now = time.monotonic()
             last = self._last_warning.get(key)
             if last is not None and now - last < self.warn_interval:
-                self._suppressed[key] = self._suppressed.get(key, 0) + 1
+                self._suppressed[key] = self._suppressed.get(key, 0) + count
                 return
             suppressed = self._suppressed.pop(key, 0)
             self._last_warning[key] = now
