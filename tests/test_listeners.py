@@ -265,3 +265,35 @@ def test_a_parse_failure_is_reported_as_parse_and_skips_the_handler(monkeypatch,
     assert server.failures == 1
     assert messages and messages[0].startswith("listener could not parse a line from 203.0.113.9: ValueError")
     assert "25:61:61" not in messages[0], "the untrusted line itself is never logged"
+
+
+def test_exception_text_cannot_forge_log_lines(monkeypatch, caplog) -> None:
+    """A handler's exception can quote event data; CR, LF and escape sequences
+    in it would let a sender forge or hide log lines."""
+    import logging
+
+    def handler(raw: dict) -> None:
+        raise ValueError("bad\r\nlistener could not parse a line from 10.0.0.1\x1b[2K\x1b[1A")
+
+    server = SyslogServer(handler)
+    with caplog.at_level(logging.WARNING, logger="autosiem.listeners"):
+        server._process_line("x", ("203.0.113.9", 514))
+    [message] = [r.getMessage() for r in caplog.records if r.name == "autosiem.listeners"]
+    assert not any(ch in message for ch in "\r\n\x1b")
+    assert "\\r\\n" in message and "\\x1b[2K" in message
+
+
+def test_stop_waits_for_queued_lines_so_failures_is_final() -> None:
+    """stop() used shutdown(wait=False): the CLI's exit summary read the counter
+    while workers were still failing lines, so it undercounted."""
+    def slow_failure(raw: dict) -> None:
+        threading.Event().wait(0.05)
+        raise RuntimeError("database is locked")
+
+    server = SyslogServer(slow_failure, host="127.0.0.1", port=0, warn_interval=3600)
+    server.start()
+    assert server._executor is not None
+    for _ in range(12):
+        server._executor.submit(server._process_line, "x", ("203.0.113.9", 514))
+    server.stop()
+    assert server.failures == 12

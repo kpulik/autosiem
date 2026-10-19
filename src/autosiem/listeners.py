@@ -24,6 +24,13 @@ from typing import Any, Callable
 
 _LOG = logging.getLogger(__name__)
 
+
+def _printable(text: str, limit: int = 300) -> str:
+    """Escape every control character, so text that may carry event data (an
+    exception message can quote a field) cannot forge log lines with CR, LF or
+    terminal escape sequences."""
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text[:limit])
+
 _CEF_RE = re.compile(
     r"^CEF:(?P<version>\d+)\|(?P<vendor>[^|]*)\|(?P<product>[^|]*)\|(?P<product_version>[^|]*)\|"
     r"(?P<signature_id>[^|]*)\|(?P<name>[^|]*)\|(?P<severity>\d*)\|(?P<extension>.*)$",
@@ -261,13 +268,14 @@ class SyslogServer:
                 return
             suppressed, self._suppressed = self._suppressed, 0
             self._last_warning = now
-        # Logged outside the lock, and never the line itself (untrusted input).
+        # Logged outside the lock. The line itself is never logged, and the
+        # exception text is escaped because it can quote untrusted event data.
         _LOG.warning(
             "listener could not %s a line from %s: %s: %s (%d failures so far%s)",
             stage,
             addr[0] if addr else "?",
             type(exc).__name__,
-            str(exc).replace("\n", " ")[:300],
+            _printable(str(exc)),
             total,
             f"; {suppressed} more not shown" if suppressed else "",
         )
@@ -301,7 +309,13 @@ class SyslogServer:
             except OSError:
                 pass
         if self._executor is not None:
-            self._executor.shutdown(wait=False)
+            # Wait for lines already handed to workers. Python joins these
+            # threads at exit anyway, so this changes no timing; it makes
+            # `failures` final when stop() returns, so a caller's summary is not
+            # an undercount followed by late warnings. A worker that calls stop()
+            # cannot wait on itself.
+            in_worker = threading.current_thread().name.startswith("syslog-worker")
+            self._executor.shutdown(wait=not in_worker)
         if self._thread is not None and self._thread is not threading.current_thread():
             self._thread.join(timeout=2)
 
