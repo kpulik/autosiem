@@ -117,6 +117,27 @@ def test_a_failing_batch_is_reported_with_its_line_count_and_the_loop_survives()
     assert seen == [3]
 
 
+def test_a_broken_failure_callback_does_not_kill_the_flusher() -> None:
+    """If on_failure raises, the single thread that drains the buffer must live on."""
+    seen: list[int] = []
+    calls = {"n": 0}
+
+    def process(batch: list[dict]) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is locked")
+        seen.append(len(batch))
+
+    def broken(exc: Exception, count: int) -> None:
+        raise ValueError("callback bug")
+
+    handler = _handler(process, broken, max_batch=2, max_wait=3600.0)
+    for i in range(4):
+        handler({"i": i})
+    handler.close()
+    assert seen == [2]
+
+
 def test_a_batch_size_of_one_is_synchronous_and_serialized() -> None:
     order: list[int] = []
     active = {"now": 0, "max": 0}
@@ -164,3 +185,15 @@ def test_a_non_positive_batch_size_is_treated_as_one(bad: int) -> None:
     handler({"i": 1})
     assert out == [1]
     handler.close()
+
+
+@pytest.mark.parametrize("wait", [float("inf"), float("nan"), 1e308, -5.0])
+def test_a_hostile_max_wait_cannot_kill_the_flusher(wait: float) -> None:
+    """Condition.wait raised OverflowError for a huge timeout; the flusher thread
+    died and buffered events were never flushed."""
+    batches: list[list[dict]] = []
+    handler = _handler(batches.append, max_batch=1000, max_wait=wait)
+    handler({"i": 1})
+    handler.close()
+    assert [len(b) for b in batches] == [1]
+    assert handler.max_wait <= 3600

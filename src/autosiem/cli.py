@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .backends import BackendError
+from .bus import QueueFullError
 from .pipeline import AutoSIEMPipeline, PipelineResult
 from .rbac import ROLE_PERMISSIONS, ROLES, Rbac
 from .storage import DEFAULT_DB_PATH, DEFAULT_TENANT, RelationalStorage, open_storage
@@ -33,7 +34,7 @@ from .schemas import DetectionRule
 from .sigma import export_rules
 from .sigma_sync import DEFAULT_RULESET, RULESETS, default_sigma_dir, load_synced_rules, merge_rules, sync_rules
 from .connectors import registry
-from .listeners import BatchingHandler, SyslogServer
+from .listeners import MAX_BATCH_WAIT_SECONDS, BatchingHandler, SyslogServer
 from .soar import SoarPlanner
 from .threat_intel import ThreatIntelMatcher, default_intel_state, load_intel_state, load_stix_bundle, save_intel_state
 from .update_job import run_update
@@ -167,10 +168,10 @@ def main() -> None:
     listen.add_argument("--host", default="127.0.0.1")
     listen.add_argument("--port", type=int, default=5514, help="UDP port (default 5514; use 514 with sudo)")
     listen.add_argument("--rules", default=str(DEFAULT_RULE_PATH), help="Rule file or directory")
-    listen.add_argument("--batch-size", type=int, default=200,
+    listen.add_argument("--batch-size", type=_positive_int, default=200,
                         help="Process events in batches of up to this many so related events share an incident "
                              "(default 200; 1 handles each event immediately, one incident per event)")
-    listen.add_argument("--batch-wait", type=float, default=1.0,
+    listen.add_argument("--batch-wait", type=_batch_wait_seconds, default=1.0,
                         help="Seconds to wait for a batch to fill before processing it (default 1.0)")
     _add_llm_arg(listen)
     _add_storage_args(listen)
@@ -660,6 +661,27 @@ def _add_storage_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--no-save", action="store_true", help="Do not persist pipeline output to the configured store")
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+def _batch_wait_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    # NaN fails both comparisons; inf and absurd values exceed the cap.
+    if not (0 <= value <= MAX_BATCH_WAIT_SECONDS):
+        raise argparse.ArgumentTypeError(f"must be between 0 and {MAX_BATCH_WAIT_SECONDS:g} seconds")
+    return value
+
+
 @contextmanager
 def _event_backend_errors(*, saved: bool, queued: bool) -> Iterator[None]:
     """Report a failing alternate event backend as one line, not a traceback.
@@ -1011,8 +1033,23 @@ def _run_listener(args: argparse.Namespace) -> None:
             print(f"Replayed {replay_result['replayed']} events from queue")
 
     def process_batch(batch: list[dict[str, Any]]) -> None:
-        # One process_lines call per batch: incidents are built from the findings
-        # of a single call, so only events in the same batch can share one.
+        # One process_lines call per call-chunk: incidents are built from the
+        # findings of a single call, so only events in the same chunk share one.
+        # DistributedPipeline.run enqueues every line before processing any and
+        # loses the unqueued suffix if the queue fills part-way, so a batch is
+        # cut to the queue's free room; whatever cannot be queued is refused
+        # loudly (counted per line) instead of vanishing.
+        while batch:
+            room = dist_pipeline.queue_room() if dist_pipeline else None
+            if room is None or room >= len(batch):
+                chunk, batch = batch, []
+            elif room > 0:
+                chunk, batch = batch[:room], batch[room:]
+            else:
+                raise QueueFullError(f"queue full: {len(batch)} line(s) not accepted")
+            process_chunk(chunk)
+
+    def process_chunk(batch: list[dict[str, Any]]) -> None:
         lines = [json.dumps(raw) for raw in batch]
         result = dist_pipeline.run(lines) if dist_pipeline else pipeline.process_lines(lines)
         if store and dist_pipeline is None:
