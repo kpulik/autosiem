@@ -385,3 +385,14 @@ def test_a_line_the_pool_refuses_is_handled_by_the_receiver() -> None:
         sock.close()
         server.stop()
     assert [raw["message"] for raw in handled] == ["one", "two", "three"]
+
+
+def test_sender_address_is_recorded_but_is_not_the_events_source_ip() -> None:
+    """A relay's address as src_ip tied unrelated hosts together and got it blocked."""
+    received = []
+    server = SyslogServer(handler=received.append)
+    server._process_line("<38>Oct  1 10:00:00 web1 app: authentication failure", ("192.0.2.1", 514))
+    server._process_line("<38>Oct  1 10:00:00 web2 sshd[1]: Failed password for bob from 203.0.113.5 port 22 ssh2", ("192.0.2.1", 514))
+    no_source, with_source = received
+    assert "src_ip" not in no_source and no_source["sender_ip"] == "192.0.2.1"
+    assert with_source["src_ip"] == "203.0.113.5" and with_source["sender_ip"] == "192.0.2.1"

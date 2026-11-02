@@ -347,9 +347,11 @@ class SyslogServer:
         except Exception as exc:
             self.record_failure("parse", addr, exc)
             return
-        # Annotate with source IP if missing
-        if isinstance(raw, dict) and "src_ip" not in raw and addr:
-            raw["src_ip"] = addr[0]
+        # The sender is whoever delivered the line, often a relay: never the
+        # event's source IP, or every line behind one relay would share an entity
+        # and correlate, and containment would propose blocking the relay.
+        if isinstance(raw, dict) and addr:
+            raw["sender_ip"] = addr[0]
         try:
             self.handler(raw)
         except Exception as exc:
