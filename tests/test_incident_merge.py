@@ -464,14 +464,13 @@ def test_cli_demo_twice_stays_two_runs(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.skipif(not os.environ.get("AUTOSIEM_TEST_POSTGRES_DSN"), reason="needs local PostgreSQL")
 def test_postgres_merge_keeps_triage_and_replaces_the_assessment():
-    from psycopg import connect, sql
-
     from autosiem import postgres
 
+    driver = postgres._driver()
     base = os.environ["AUTOSIEM_TEST_POSTGRES_DSN"]
     name = "autosiem_test_" + uuid4().hex
-    with connect(base, autocommit=True) as admin:
-        admin.execute(sql.SQL("create database {}").format(sql.Identifier(name)))
+    with driver.connect(base, autocommit=True) as admin:
+        admin.execute(driver.sql.SQL("create database {}").format(driver.sql.Identifier(name)))
     dsn = f"{base} dbname={name}"
     try:
         postgres.migrate(dsn)
@@ -496,5 +495,5 @@ def test_postgres_merge_keeps_triage_and_replaces_the_assessment():
         assert len(keys) == len(set(keys))
         assert store.verify_audit_chain() == []
     finally:
-        with connect(base, autocommit=True) as admin:
-            admin.execute(sql.SQL("drop database {} with (force)").format(sql.Identifier(name)))
+        with driver.connect(base, autocommit=True) as admin:
+            admin.execute(driver.sql.SQL("drop database {} with (force)").format(driver.sql.Identifier(name)))
