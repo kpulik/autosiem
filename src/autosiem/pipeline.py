@@ -15,11 +15,12 @@ from .llm import LLMService
 from .normalization import normalize, parse_raw_line
 from .policy import base_technique, classify_target
 from .rag import RagEngine
-from .risk import build_incidents
+from .risk import UNKNOWN_ENTITY, IncidentMerge, StoredIncident, build_incidents, merge_into_stored
 from .rules import load_rules
 from .schemas import DetectionRule, Finding, Incident, NormalizedEvent, Severity
 from .soar import SoarPlanner
 from .soc_runtime import AIAnalystRuntime, ActionProposal, EventSearcher, Investigation
+from .storage_ports import IncidentMergeStore
 from .suppression import SuppressionEngine
 from .system_one import DecisionEngine, DecisionOutcome
 from .threat_intel import ThreatIntelMatcher
@@ -42,6 +43,8 @@ class PipelineResult:
     events: list[NormalizedEvent] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     incidents: list[Incident] = field(default_factory=list)
+    #: Incident id -> ids of the findings this run added to that stored incident.
+    merges: dict[str, list[str]] = field(default_factory=dict)
     reports: dict[str, str] = field(default_factory=dict)
     investigations: dict[str, Investigation] = field(default_factory=dict)
     suppressed: list[dict[str, Any]] = field(default_factory=list)
@@ -70,8 +73,12 @@ class AutoSIEMPipeline:
         baseline_store: BaselineStore | None = None,
         enrichment: EnrichmentRegistry | None = None,
         decision_engine: DecisionEngine | None = None,
+        incident_store: IncidentMergeStore | None = None,
     ) -> None:
         self.rules = rules
+        # With a store, findings join stored open incidents they correlate with,
+        # so an attack spanning several runs or batches stays one incident.
+        self.incident_store = incident_store
         self.baseline_store = baseline_store
         self.tenant_id = tenant_id
         self.enrichment = enrichment
@@ -165,9 +172,16 @@ class AutoSIEMPipeline:
                 adjusted = self.enrichment.adjusted_risk(finding.risk_points, finding.entities)
                 if adjusted != finding.risk_points:
                     finding.risk_points = adjusted
-        result.incidents = build_incidents(result.findings)
+        merges = self._correlate(result)
         for incident in result.incidents:
-            related = [finding for finding in result.findings if finding.finding_id in incident.finding_ids]
+            merge = merges.get(incident.incident_id)
+            # More of the same only updates the stored incident.
+            if merge is not None and not merge.material:
+                continue
+            # A merged incident is judged on all its findings, or a slow attack
+            # would never reach the risk that containment requires.
+            scope = merge.findings if merge is not None else result.findings
+            related = [finding for finding in scope if finding.finding_id in incident.finding_ids]
             rag_context = self.rag.build_prompt(incident) if self.rag else ""
             # System One runs between correlation and the generative step, so a
             # cheap typed decision can inform whether the expensive narrative
@@ -189,13 +203,13 @@ class AutoSIEMPipeline:
                     if outcome is not None:
                         outcome = replace(outcome, llm_escalated=True)
             else:
-                report = self.investigator.explain(incident, result.findings)
+                report = self.investigator.explain(incident, scope)
                 if rag_context:
                     report = f"{report}\n\n{rag_context}"
                 decision_override = None
             result.reports[incident.incident_id] = report
             investigation = self.analyst_runtime.investigate(
-                incident, result.findings, decision_override=decision_override
+                incident, scope, decision_override=decision_override
             )
             if self.soar:
                 investigation = self._apply_soar_plan(investigation, incident, related)
@@ -204,6 +218,34 @@ class AutoSIEMPipeline:
                 result.decisions[incident.incident_id] = outcome
         self._persist_baseline()
         return result
+
+    def _correlate(self, result: PipelineResult) -> dict[str, IncidentMerge]:
+        """Fill ``result.incidents``, joining stored incidents where a store is set.
+
+        A failed lookup costs only the merge: the findings still become incidents.
+        """
+        try:
+            fresh, merged = merge_into_stored(result.findings, self._stored_incidents(result.findings))
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Incident merge skipped (%s)", type(exc).__name__)
+            result.incidents = build_incidents(result.findings)
+            return {}
+        result.incidents = sorted(
+            [*fresh, *(merge.incident for merge in merged)],
+            key=lambda incident: incident.risk_score,
+            reverse=True,
+        )
+        result.merges = {merge.incident.incident_id: merge.new_finding_ids for merge in merged}
+        return {merge.incident.incident_id: merge for merge in merged}
+
+    def _stored_incidents(self, findings: list[Finding]) -> list[StoredIncident]:
+        entities = {entity for finding in findings for entity in finding.entities} - {UNKNOWN_ENTITY}
+        if self.incident_store is None or not entities:
+            return []
+        return [
+            StoredIncident(Incident.from_dict(row["incident"]), [Finding.from_dict(doc) for doc in row["findings"]])
+            for row in self.incident_store.open_incidents_for_entities(entities, tenant_id=self.tenant_id)
+        ]
 
     def _assess(
         self, incident: Incident, related: list[Finding], result: PipelineResult

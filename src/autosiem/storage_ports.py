@@ -33,6 +33,15 @@ class IncidentQueryStore(Protocol):
 
 
 @runtime_checkable
+class IncidentMergeStore(Protocol):
+    """Read open incidents that new findings may belong to."""
+
+    def open_incidents_for_entities(
+        self, entities: set[str], tenant_id: str | None = ...
+    ) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
 class BaselineStore(Protocol):
     """Persist UEBA baseline state for a tenant."""
 

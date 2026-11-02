@@ -111,7 +111,7 @@ For how companies deploy AutoSIEM and get data into it (agents, agentless connec
 | `coverage.py` | Coverage against the full ATT&CK matrix (via `attack_matrix.py`) + the curated technique watchlist |
 | `attack_matrix.py` | Vendored ATT&CK Enterprise index (technique -> name + tactics); regenerate with `scripts/build_attack_index.py` |
 | `anomaly.py` | entity behavioral analytics (UEBA): novel-action/IP/host, off-hours, population rarity, peer-group rarity, and burst signals against a per-tenant baseline persisted in SQLite |
-| `risk.py` | entity risk aggregation + time-windowed entity-graph incident correlation |
+| `risk.py` | entity risk aggregation + time-windowed entity-graph incident correlation, within a run and into stored open incidents |
 | `enrichment.py` | asset inventory, identity directory, network/CIDR classification, threat-intel and KEV vulnerability context; criticality scales finding risk; **identity roles** turn an account's routine findings down to low (never hidden, never for critical rules) |
 | `suppression.py` | analyst exceptions and auto-repeat suppression for noisy detections |
 | `ai.py` | AI investigation abstraction with deterministic local fallback |

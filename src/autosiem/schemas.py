@@ -163,6 +163,22 @@ class Finding:
     mitre_attack: list[str]
     evidence: dict[str, Any]
 
+    @classmethod
+    def from_dict(cls, doc: dict[str, Any]) -> "Finding":
+        """Rebuild a finding from its stored JSON document."""
+        return cls(
+            finding_id=doc["finding_id"],
+            rule_id=doc["rule_id"],
+            rule_name=doc["rule_name"],
+            event_id=doc["event_id"],
+            timestamp=datetime.fromisoformat(doc["timestamp"]),
+            severity=Severity[str(doc["severity"]).upper()],
+            risk_points=int(doc["risk_points"]),
+            entities=list(doc.get("entities") or []),
+            mitre_attack=list(doc.get("mitre_attack") or []),
+            evidence=dict(doc.get("evidence") or {}),
+        )
+
 
 @dataclass(slots=True)
 class EntityRisk:
@@ -183,3 +199,18 @@ class Incident:
     mitre_attack: list[str]
     summary: str
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @classmethod
+    def from_dict(cls, doc: dict[str, Any]) -> "Incident":
+        """Rebuild an incident from its stored JSON document."""
+        return cls(
+            incident_id=doc["incident_id"],
+            title=doc["title"],
+            severity=Severity[str(doc["severity"]).upper()],
+            risk_score=int(doc["risk_score"]),
+            entities=list(doc.get("entities") or []),
+            finding_ids=list(doc.get("finding_ids") or []),
+            mitre_attack=list(doc.get("mitre_attack") or []),
+            summary=doc.get("summary", ""),
+            created_at=datetime.fromisoformat(doc["created_at"]),
+        )

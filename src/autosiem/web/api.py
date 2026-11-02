@@ -573,7 +573,7 @@ async def api_add_incident_comment(incident_id: str, request: Request) -> dict[s
     return comment
 
 
-def _pipeline(tenant_id: str | None = None) -> AutoSIEMPipeline:
+def _pipeline(tenant_id: str | None = None, merge: bool = True) -> AutoSIEMPipeline:
     service = LLMService(config=config_from_env())
     if not service.enabled:
         service = None
@@ -593,6 +593,7 @@ def _pipeline(tenant_id: str | None = None) -> AutoSIEMPipeline:
         tenant_id=tenant_id,
         baseline_store=store,
         enrichment=enrichment_from_env(),
+        incident_store=store if merge else None,
     )
 
 
@@ -601,7 +602,8 @@ async def api_ingest_demo(request: Request) -> dict[str, Any]:
     _require_permission(request, PERM_INGEST)
     tenant = _tenant(request)
     lines = [json.dumps(event) for event in DEMO_EVENTS]
-    pipeline = _pipeline(tenant_id=tenant)
+    # Fixed timestamps: a replayed demo is not a continuation of the last one.
+    pipeline = _pipeline(tenant_id=tenant, merge=False)
     result = pipeline.process_lines(lines)
     get_store().save_pipeline_result(result, tenant_id=tenant)
     return {"events": len(result.events), "findings": len(result.findings), "incidents": len(result.incidents), "llm_enabled": pipeline.llm is not None}
@@ -714,7 +716,7 @@ async def api_test_rule(request: Request) -> dict[str, Any]:
     event = body.get("event")
     if not isinstance(event, dict):
         raise HTTPException(status_code=400, detail="event_required")
-    pipeline = _pipeline(tenant_id=_tenant(request))
+    pipeline = _pipeline(tenant_id=_tenant(request), merge=False)
     result = pipeline.process_lines([json.dumps(event)])
     return {
         "events": len(result.events),
