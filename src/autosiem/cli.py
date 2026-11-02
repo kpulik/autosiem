@@ -562,6 +562,7 @@ def _run_distributed(args: argparse.Namespace) -> None:
                 threat_intel=_make_threat_intel(args), rag=default_rag_engine(store, tenant_id=DEFAULT_TENANT),
                 soar=SoarPlanner(), event_search=store, baseline_store=store, tenant_id=DEFAULT_TENANT,
                 enrichment=enrichment_from_env(indicators=load_intel_state(default_intel_state(args.db))),
+                incident_store=store,
             )
         pipeline = DistributedPipeline(
             config, rules, db_path=str(args.db), pipeline=configured,
@@ -734,7 +735,7 @@ def _run_pipeline_command(args: argparse.Namespace, suppression_engine: Suppress
     
     if args.command == "ingest":
         lines = Path(args.file).read_text(encoding="utf-8").splitlines()
-        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher, decision_engine=decider)
+        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher, decision_engine=decider, incident_store=store)
         # When distributed components are configured, they wrap this one
         # pipeline (archive -> queue -> process -> backend -> ack). Running the
         # standard pipeline as well would process every event twice.
@@ -748,12 +749,12 @@ def _run_pipeline_command(args: argparse.Namespace, suppression_engine: Suppress
         if not health.ok:
             print(json.dumps({"connector": args.connector, "error": health.detail}, indent=2))
         lines = [json.dumps(event) for event in events]
-        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher, decision_engine=decider)
+        pipeline = AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, baseline_store=searcher, enrichment=enricher, decision_engine=decider, incident_store=store)
         return finish(pipeline.process_lines(lines))
-    # `demo` deliberately does NOT persist the behavioral baseline. Its events
-    # carry fixed timestamps, so replaying them stacks several events onto the
-    # same instant and trips the burst signal on every re-run. Real ingest paths
-    # advance in time and do keep a warm baseline.
+    # `demo` deliberately does NOT persist the behavioral baseline or merge into
+    # stored incidents. Its events carry fixed timestamps, so replaying them stacks
+    # several events onto the same instant and trips the burst signal on every
+    # re-run. Real ingest paths advance in time and do both.
     lines = [json.dumps(event) for event in DEMO_EVENTS]
     return finish(AutoSIEMPipeline(rules, llm=llm, suppression_engine=suppression_engine, threat_intel=threat_intel, rag=ragger, soar=soarer, event_search=searcher, tenant_id=DEFAULT_TENANT, enrichment=enricher, decision_engine=decider).process_lines(lines))
 
@@ -1014,6 +1015,7 @@ def _run_listener(args: argparse.Namespace) -> None:
         tenant_id=DEFAULT_TENANT,
         baseline_store=listener_store,
         enrichment=enrichment_from_env(indicators=load_intel_state(default_intel_state(args.db))),
+        incident_store=store,
     )
     
     # Check for distributed mode
@@ -1147,6 +1149,7 @@ def _print_pipeline_result(result: PipelineResult, saved: bool, db: str) -> None
                 "risk_score": incident.risk_score,
                 "entities": incident.entities,
                 "mitre_attack": incident.mitre_attack,
+                "merged_findings": len(result.merges.get(incident.incident_id, [])),
                 "ai_analyst": _investigation_summary(result, incident.incident_id),
             }
             for incident in result.incidents
@@ -1154,6 +1157,9 @@ def _print_pipeline_result(result: PipelineResult, saved: bool, db: str) -> None
     })
     if result.incidents:
         top = result.incidents[0]
+        if top.incident_id not in result.investigations:
+            print(f"\nAdded {len(result.merges[top.incident_id])} finding(s) to incident {top.incident_id}; no material change, not re-investigated.")
+            return
         _print_system_one(result, top.incident_id)
         print("\n=== AI Investigation Report ===")
         print(result.reports[top.incident_id])

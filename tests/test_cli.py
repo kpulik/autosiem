@@ -537,7 +537,27 @@ def test_batch_size_one_keeps_per_event_processing(capsys, monkeypatch, tmp_path
     db = tmp_path / "per-event.db"
     _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--batch-size", "1", "--rules", str(RULES_DIR), "--db", str(db))
     assert len(open_storage(db).list_events(limit=1000)) == 40
-    assert _incident_count(db) > 1
+    # One save per event, and each one joins the incident the first event opened.
+    with open_storage(db).connect() as conn:
+        saves = conn.execute("select count(*) as n from audit_log where action = 'pipeline_result_saved'").fetchone()["n"]
+    assert saves == 40
+    assert _incident_count(db) == 1
+
+
+def test_batch_size_one_without_a_store_has_nothing_to_merge_into(capsys, monkeypatch, tmp_path) -> None:
+    import autosiem.cli as cli
+
+    built = []
+    real = cli.AutoSIEMPipeline
+
+    def spy(*args, **kwargs):
+        built.append(kwargs.get("incident_store"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "AutoSIEMPipeline", spy)
+    monkeypatch.setattr(cli, "SyslogServer", _BruteForceServer)
+    _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--no-save", "--rules", str(RULES_DIR), "--db", str(tmp_path / "ns.db"))
+    assert built == [None]
 
 
 

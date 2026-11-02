@@ -8,13 +8,15 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
 from .private_files import create_private
+from .risk import MAX_INCIDENT_FINDINGS, incident_from_findings
+from .schemas import Finding
 from .soc_runtime import Investigation
 from .suppression import (
     DEFAULT_CREATED_BY,
@@ -33,6 +35,12 @@ DEFAULT_TENANT = "default"
 AI_ANALYST_ACTOR = "ai-analyst"
 
 INCIDENT_STATUSES = {"open", "investigating", "resolved", "closed"}
+#: Only these take new findings. An analyst's verdict on a resolved or closed
+#: incident stands; later activity opens a new one.
+MERGEABLE_INCIDENT_STATUSES = ("open", "investigating")
+#: Most recently active open incidents checked per batch. An attack older than
+#: this many other incidents opens a new incident, which loses no findings.
+OPEN_INCIDENT_SCAN_LIMIT = 500
 
 # --- Audit sealing (SEC-005) -----------------------------------------------
 # The SHA-256 chain makes tampering *evident* but not *proof*: anyone with
@@ -141,27 +149,46 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                         tenant,
                     ),
                 )
+            merges = getattr(result, "merges", {})
             for incident in result.incidents:
-                doc = _to_jsonable(incident)
-                inserted = self._insert(
-                    conn, "incidents", 'incident_id,title,severity,risk_score,status,created_at,data,tenant_id',
-                    (
-                        incident.incident_id,
-                        incident.title,
-                        incident.severity.name.lower(),
-                        incident.risk_score,
-                        "open",
-                        incident.created_at.isoformat(),
-                        _json(doc),
-                        tenant,
-                    ),
-                )
-                decision = getattr(result, "decisions", {}).get(incident.incident_id)
-                if decision is not None and inserted:
+                source_id = incident.incident_id
+                new_ids = merges.get(source_id)
+                merged = new_ids is not None and self._merge_incident(conn, source_id, new_ids, tenant)
+                if new_ids is not None and not merged:
+                    # Resolved or closed since the pipeline read it: the verdict
+                    # stands, so the new findings open their own incident.
+                    added = set(new_ids)
+                    incident = incident_from_findings([item for item in result.findings if item.finding_id in added])
+                written = merged
+                if not merged:
+                    doc = _to_jsonable(incident)
+                    written = self._insert(
+                        conn, "incidents", 'incident_id,title,severity,risk_score,status,created_at,data,tenant_id',
+                        (
+                            incident.incident_id,
+                            incident.title,
+                            incident.severity.name.lower(),
+                            incident.risk_score,
+                            "open",
+                            incident.created_at.isoformat(),
+                            _json(doc),
+                            tenant,
+                        ),
+                    )
+                decision = getattr(result, "decisions", {}).get(source_id)
+                if decision is not None and written:
+                    if merged:
+                        # One assessment per incident: the latest one replaces it.
+                        conn.execute("delete from system_one_decisions where incident_id = ? and tenant_id = ?", (source_id, tenant))
                     self._save_decision(conn, incident.incident_id, decision, tenant_id=tenant)
-                investigation = result.investigations.get(incident.incident_id)
-                if investigation and inserted:
-                    self._save_investigation(conn, incident.incident_id, investigation, tenant_id=tenant)
+                investigation = result.investigations.get(source_id)
+                if investigation and written:
+                    if incident.incident_id != source_id:
+                        investigation = replace(investigation, incident_id=incident.incident_id)
+                    self._save_investigation(
+                        conn, incident.incident_id, investigation, tenant_id=tenant,
+                        skip=self._live_proposals(conn, source_id, tenant) if merged else None,
+                    )
                     # The runtime drafts the note during the investigation, but the
                     # incident row only exists now, so the comment is written here.
                     note = getattr(investigation, "case_note", None)
@@ -175,7 +202,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                             details={"comment_id": comment["comment_id"], "source": "ai_case_note", "tenant_id": tenant},
                             tenant_id=tenant,
                         )
-            self.audit(conn, actor="system", action="pipeline_result_saved", target=None, details={"events": len(result.events), "findings": len(result.findings), "incidents": len(result.incidents), "tenant_id": tenant}, tenant_id=tenant)
+            self.audit(conn, actor="system", action="pipeline_result_saved", target=None, details={"events": len(result.events), "findings": len(result.findings), "incidents": len(result.incidents), "merged": len(getattr(result, "merges", {})), "tenant_id": tenant}, tenant_id=tenant)
             if getattr(result, "suppressed", None):
                 self.audit(
                     conn,
@@ -185,6 +212,75 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                     details={"count": len(result.suppressed), "items": result.suppressed},
                     tenant_id=tenant,
                 )
+
+    def open_incidents_for_entities(
+        self, entities: set[str], tenant_id: str | None = None, scan_limit: int = OPEN_INCIDENT_SCAN_LIMIT
+    ) -> list[dict[str, Any]]:
+        """Open incidents touching any of ``entities``, each with its finding documents."""
+        tenant = tenant_id or DEFAULT_TENANT
+        statuses = ",".join("?" for _ in MERGEABLE_INCIDENT_STATUSES)
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"select * from incidents where tenant_id = ? and status in ({statuses}) "
+                "order by coalesce(updated_at, created_at) desc limit ?",
+                (tenant, *MERGEABLE_INCIDENT_STATUSES, scan_limit),
+            ).fetchall()
+            matches = []
+            for row in rows:
+                doc = _row_to_dict(row)["data"]
+                finding_ids = doc.get("finding_ids") or []
+                # A full incident takes no more, so a long attack's earlier
+                # incidents add no work to every later batch.
+                if len(finding_ids) < MAX_INCIDENT_FINDINGS and entities.intersection(doc.get("entities") or []):
+                    findings = self._findings_by_ids(conn, finding_ids, tenant)
+                    matches.append({"incident": doc, "findings": [item["data"] for item in findings]})
+            return matches
+
+    def _merge_incident(self, conn: Any, incident_id: str, new_ids: list[str], tenant: str) -> bool:
+        """Add findings to a stored incident, keeping its triage. False if it is no longer open.
+
+        Everything is recomputed from the stored findings under the row lock, so
+        two writers merging into one incident cannot lose each other's findings.
+        """
+        row = self._select_row(conn, "incidents", "incident_id", incident_id, tenant, lock=True)
+        if not row or row["status"] not in MERGEABLE_INCIDENT_STATUSES:
+            return False
+        stored = _row_to_dict(row)["data"]
+        known: list[str] = list(stored.get("finding_ids") or [])
+        finding_ids = list(dict.fromkeys([*known, *new_ids]))
+        findings = [Finding.from_dict(item["data"]) for item in self._findings_by_ids(conn, finding_ids, tenant)]
+        incident = incident_from_findings(findings, incident_id, datetime.fromisoformat(stored["created_at"]))
+        conn.execute(
+            "update incidents set title = ?, severity = ?, risk_score = ?, data = ?, updated_at = ? "
+            "where incident_id = ? and tenant_id = ?",
+            (
+                incident.title,
+                incident.severity.name.lower(),
+                incident.risk_score,
+                _json(_to_jsonable(incident)),
+                datetime.now(timezone.utc).isoformat(),
+                incident_id,
+                tenant,
+            ),
+        )
+        self.audit(
+            conn,
+            actor="system",
+            action="incident_merged",
+            target=incident_id,
+            details={"new_findings": len(new_ids), "risk_score": incident.risk_score, "tenant_id": tenant},
+            tenant_id=tenant,
+        )
+        return True
+
+    def _live_proposals(self, conn: Any, incident_id: str, tenant: str) -> set[tuple[str, str]]:
+        """Proposals not to raise again. A rejected one may return on new evidence."""
+        rows = conn.execute(
+            "select action, target from action_proposals "
+            "where incident_id = ? and tenant_id = ? and status in ('pending', 'approved')",
+            (incident_id, tenant),
+        ).fetchall()
+        return {(row["action"], row["target"]) for row in rows}
 
     def _save_decision(
         self,
@@ -275,6 +371,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
         incident_id: str,
         investigation: Investigation,
         tenant_id: str | None = None,
+        skip: set[tuple[str, str]] | None = None,
     ) -> None:
         tenant = tenant_id or DEFAULT_TENANT
         doc = _to_jsonable(investigation)
@@ -292,6 +389,8 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
             ),
         )
         for proposal in investigation.action_proposals:
+            if skip and (proposal.action, proposal.target) in skip:
+                continue
             self._insert(
                 conn, "action_proposals", 'proposal_id,investigation_id,incident_id,action,target,confidence,approval_required,executable_now,status,data,tenant_id',
                 (
