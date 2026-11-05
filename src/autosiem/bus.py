@@ -10,6 +10,8 @@ Only the Python standard library is required at runtime.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -20,6 +22,16 @@ from .private_files import create_private
 
 #: ``messages.acked`` value of a message set aside by ``DurableQueue.dead_letter``.
 DEAD_LETTER = 2
+
+#: Acknowledged rows a queue accumulates before it deletes them. Without this a
+#: long-running listener kept one row per event for ever.
+COMPACT_AFTER_ACKS = 10_000
+
+#: Rows deleted per statement. The lock is released between chunks, so clearing
+#: an old queue of a million rows never holds up the listener's receive thread.
+COMPACT_CHUNK = 5_000
+
+_LOG = logging.getLogger(__name__)
 
 
 class QueueFullError(Exception):
@@ -138,6 +150,11 @@ class DurableQueue:
         # pending() runs on every push; without this it scans every acked row.
         self._conn.execute("CREATE INDEX IF NOT EXISTS messages_pending ON messages(offset) WHERE acked = 0")
         self._conn.commit()
+        # Counted once, so a queue left large by an older version is cleared by
+        # the first acknowledgement after it is opened.
+        self._acks_since_compact = int(
+            self._conn.execute("SELECT COUNT(*) FROM messages WHERE acked = 1").fetchone()[0]
+        )
 
     def _insert(self, topic: str, payload: Any) -> int:
         created_at = datetime.now(timezone.utc).isoformat()
@@ -198,14 +215,60 @@ class DurableQueue:
         return [self._decode(row) for row in rows]
 
     def ack(self, offset: int) -> None:
-        with self._lock:
-            self._conn.execute("UPDATE messages SET acked = 1 WHERE offset = ?", (offset,))
-            self._conn.commit()
+        self.ack_many([offset])
 
     def ack_many(self, offsets: list[int]) -> None:
         with self._lock:
             self._conn.executemany("UPDATE messages SET acked = 1 WHERE offset = ?", [(offset,) for offset in offsets])
             self._conn.commit()
+            self._acks_since_compact += len(offsets)
+            due = self._acks_since_compact >= COMPACT_AFTER_ACKS
+            if due:
+                self._acks_since_compact = 0
+        if due:
+            self._compact_quietly()
+
+    def _compact_quietly(self) -> None:
+        # Housekeeping: a failure here must never look like a failed ack, which
+        # would make the caller retry a batch that is already saved.
+        try:
+            self.compact_acked()
+        except sqlite3.Error as exc:
+            with self._lock:
+                self._acks_since_compact = COMPACT_AFTER_ACKS  # try again on the next ack
+            _LOG.warning("could not compact the durable queue %s (%s); retrying later", self.path, type(exc).__name__)
+
+    def compact_acked(self) -> int:
+        """Delete acknowledged rows except the newest; returns how many went.
+
+        The newest acknowledged row stays so :meth:`checkpoint` is unchanged.
+        Pending rows and dead letters are never touched. Deleting frees pages
+        for reuse, which stops the file growing; only :meth:`vacuum` shrinks it.
+        """
+        removed = 0
+        while True:
+            with self._lock:
+                ceiling = self.checkpoint() - 1
+                cursor = self._conn.execute(
+                    "DELETE FROM messages WHERE offset IN "
+                    "(SELECT offset FROM messages WHERE acked = 1 AND offset <= ? LIMIT ?)",
+                    (ceiling, COMPACT_CHUNK),
+                )
+                self._conn.commit()
+            removed += int(cursor.rowcount)
+            if cursor.rowcount < COMPACT_CHUNK:
+                return removed
+
+    def vacuum(self) -> tuple[int, int]:
+        """Rewrite the file to its live size; returns its size before and after.
+
+        VACUUM locks the whole database while it runs, so a listener using the
+        queue meanwhile has its writes refused: run it with the listener stopped.
+        """
+        before = os.path.getsize(self.path) if os.path.exists(self.path) else 0
+        with self._lock:
+            self._conn.execute("VACUUM")
+        return before, (os.path.getsize(self.path) if os.path.exists(self.path) else 0)
 
     def dead_letter(self, offset: int) -> None:
         """Set aside a message that cannot be processed, keeping it for inspection.
