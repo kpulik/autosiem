@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -349,20 +350,28 @@ def test_distributed_replay_reports_a_wedged_backend_in_one_line(capsys, monkeyp
     assert "stay pending" in message
 
 
-def test_listener_startup_replay_reports_a_wedged_backend_in_one_line(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
+def test_a_wedged_backend_does_not_stop_the_listener(capsys, monkeypatch, tmp_path, wedged_backend, caplog) -> None:
+    """The backend holds a copy of events only. Aborting startup over it (or,
+    later, failing every batch for 30 s) stopped detection for want of a copy."""
     import autosiem.cli as cli
+    from autosiem.bus import DurableQueue
 
-    _queue_with_one_pending_line(tmp_path, monkeypatch)
+    queue_path = _queue_with_one_pending_line(tmp_path, monkeypatch)
 
-    def never_reached(*_args: object, **_kwargs: object) -> None:
-        # If replay did not raise, _run_listener would go on to serve for ever.
-        raise AssertionError("startup replay did not fail; the listener would have started")
+    class _Started(_FakeSyslogServer):
+        def start(self) -> None:
+            raise KeyboardInterrupt
 
-    monkeypatch.setattr(cli.SyslogServer, "start", never_reached)
-    with pytest.raises(SystemExit) as excinfo:
-        _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "l.db"))
-    message = _one_line_backend_failure(excinfo)
-    assert "stay pending" in message
+    monkeypatch.setattr(cli, "SyslogServer", _Started)
+    db = tmp_path / "l.db"
+    with caplog.at_level("WARNING", logger="autosiem.distributed"):
+        monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(db)])
+        main()
+    err = capsys.readouterr().err
+    assert [event["user"] for event in open_storage(db).list_events(limit=10)] == ["alice"]
+    assert DurableQueue(str(queue_path)).pending() == 0
+    assert "event backend unavailable (BackendError)" in caplog.text
+    assert "1 stored event(s) never reached the event backend; the primary store has them" in err
 
 
 # --- cli listen: one pipeline, many worker threads ----------------------------
@@ -373,8 +382,9 @@ class _FakeSyslogServer:
 
     instances: list["_FakeSyslogServer"] = []
 
-    def __init__(self, handler, host: str = "127.0.0.1", port: int = 0) -> None:
+    def __init__(self, handler, host: str = "127.0.0.1", port: int = 0, batch_handler=None) -> None:
         self.handler, self.host, self.port = handler, host, port
+        self.batch_handler = batch_handler
         self.failures = 0
         self.failures_by_stage: dict[str, int] = {"parse": 0, "process": 0}
         _FakeSyslogServer.instances.append(self)
@@ -387,8 +397,12 @@ class _FakeSyslogServer:
         from concurrent.futures import ThreadPoolExecutor
 
         raws = [{"user": f"u{i}", "action": "login", "host": "h1"} for i in range(24)]
+        # A queued listener hands bursts over from its receive thread; four
+        # threads here make a race in that path show up too.
+        burst = self.batch_handler
+        deliver = self.handler if burst is None else (lambda raw: burst([raw]))
         with ThreadPoolExecutor(max_workers=4) as pool:
-            list(pool.map(self.handler, raws))
+            list(pool.map(deliver, raws))
         raise KeyboardInterrupt  # what Ctrl+C does to the serve loop
 
     def stop(self) -> None:
@@ -561,13 +575,15 @@ def test_batch_size_one_without_a_store_has_nothing_to_merge_into(capsys, monkey
 
 
 
-# --- batches versus a bounded queue -------------------------------------------
-# DistributedPipeline.run enqueues a batch as a prefix and, if the queue fills
-# part-way, loses the unqueued suffix: with persistence it raises (the whole
-# batch is dropped), with --no-save it truncates and reports success.
+# --- the listener versus a bounded queue -------------------------------------
+# With a queue, the receive thread queues each burst and one drainer thread
+# processes the queue. A burst that finds the queue full while the drainer works
+# waits for room; during an outage the queue's bound refuses lines, counted.
 
 
-def _listen_with_queue(capsys, monkeypatch, tmp_path, *, max_pending: int, prefill: int = 0, extra: tuple[str, ...] = ()):
+def _listen_with_queue(capsys, monkeypatch, tmp_path, *, max_pending: int, prefill: int = 0, extra: tuple[str, ...] = (), outage: bool = False):
+    import sqlite3
+
     import autosiem.cli as cli
     from autosiem.bus import DurableQueue
 
@@ -578,31 +594,46 @@ def _listen_with_queue(capsys, monkeypatch, tmp_path, *, max_pending: int, prefi
     monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
     monkeypatch.setenv("AUTOSIEM_QUEUE_MAX_PENDING", str(max_pending))
     monkeypatch.setattr(cli, "SyslogServer", _BruteForceServer)
-    # Startup replay would drain the pre-filled messages; keep them pending, as
-    # they are when the failures that left them behind are still happening.
-    monkeypatch.setattr(cli.DistributedPipeline, "replay_from_queue", lambda self: {"replayed": 0})
+    if outage:
+        def locked(self, *_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(cli.DistributedPipeline, "drain_queue", locked)
     monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(tmp_path / "b.db"), *extra])
     main()
-    return DurableQueue(str(queue_path)), capsys.readouterr().err
+    captured = capsys.readouterr()
+    return DurableQueue(str(queue_path)), captured.err, captured.out
 
 
-def test_a_batch_larger_than_the_queue_limit_is_processed_in_chunks(capsys, monkeypatch, tmp_path) -> None:
-    queue, err = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=15)
-    assert len(open_storage(tmp_path / "b.db").list_events(limit=1000)) == 40
-    assert queue.pending() == 0
-    assert "could not be parsed or processed" not in err
+def test_a_burst_larger_than_the_queue_limit_is_refused_counted_never_lost(capsys, monkeypatch, tmp_path) -> None:
+    """The receive thread never waits for room: while it waited, the kernel
+    dropped arriving datagrams with no count anywhere."""
+    queue, err, _out = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=15)
+    stored = len(open_storage(tmp_path / "b.db").list_events(limit=1000))
+    refused = 40 - stored
+    assert stored >= 15 and queue.pending() == 0
+    if refused:
+        assert f"{refused} line(s) could not be parsed or processed (queue {refused})" in err
 
 
 def test_a_full_queue_counts_every_refused_line_instead_of_losing_them_silently(capsys, monkeypatch, tmp_path) -> None:
-    queue, err = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=5, prefill=5)
+    queue, err, _out = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=5, prefill=5, outage=True)
     assert len(open_storage(tmp_path / "b.db").list_events(limit=1000)) == 0
     assert queue.pending() == 5, "the earlier pending messages are untouched"
-    assert "40 line(s) could not be parsed or processed (process 40)" in err
+    assert "40 line(s) could not be parsed or processed (queue 40)" in err
+    assert "5 line(s) still queued; the next start processes them" in err
 
 
 def test_no_save_with_a_full_queue_does_not_report_a_silent_success(capsys, monkeypatch, tmp_path) -> None:
-    _queue, err = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=5, prefill=5, extra=("--no-save",))
-    assert "40 line(s) could not be parsed or processed (process 40)" in err
+    _queue, err, _out = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=5, prefill=5, extra=("--no-save",), outage=True)
+    assert "40 line(s) could not be parsed or processed (queue 40)" in err
+
+
+def test_lines_queued_by_an_earlier_run_are_processed_at_startup(capsys, monkeypatch, tmp_path) -> None:
+    queue, _err, out = _listen_with_queue(capsys, monkeypatch, tmp_path, max_pending=100, prefill=3)
+    assert "Processing 3 line(s) queued by an earlier run" in out
+    assert len(open_storage(tmp_path / "b.db").list_events(limit=1000)) == 43
+    assert queue.pending() == 0
 
 
 @pytest.mark.parametrize("value", ["inf", "-1", "nan", "1e400", "abc", "86400"])
@@ -635,3 +666,55 @@ def test_batch_size_must_be_a_positive_integer(capsys, monkeypatch, tmp_path, va
         main()
     assert excinfo.value.code == 2
     assert "--batch-size" in capsys.readouterr().err
+
+
+def test_the_listener_recovers_from_an_outage_without_new_traffic(capsys, monkeypatch, tmp_path) -> None:
+    """The wedge: lines left pending by an outage were never drained in-process,
+    so once AUTOSIEM_QUEUE_MAX_PENDING had piled up every datagram was refused."""
+    import functools
+    import sqlite3
+
+    import autosiem.cli as cli
+    from autosiem.bus import DurableQueue
+
+    queue_path = tmp_path / "outage.db"
+    monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
+    monkeypatch.setattr(cli, "QueueDrainer", functools.partial(cli.QueueDrainer, retry_initial=0.02, retry_max=0.05))
+    real_drain = cli.DistributedPipeline.drain_queue
+    outage = {"left": 3}
+
+    def drain(self, *args, **kwargs):
+        if outage["left"]:
+            outage["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_drain(self, *args, **kwargs)
+
+    monkeypatch.setattr(cli.DistributedPipeline, "drain_queue", drain)
+
+    class _OneBurstThenQuiet(_FakeSyslogServer):
+        def start(self) -> None:
+            assert self.batch_handler is not None, "a queued listener hands over bursts"
+            self.batch_handler([{"user": f"u{i}", "action": "login", "host": "h1"} for i in range(10)])
+            deadline = time.monotonic() + 5
+            while DurableQueue(str(queue_path)).pending() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "SyslogServer", _OneBurstThenQuiet)
+    db = tmp_path / "outage-store.db"
+    _run_cli(capsys, monkeypatch, "listen", "--port", "0", "--rules", str(RULES_DIR), "--db", str(db))
+    assert outage["left"] == 0
+    assert len(open_storage(db).list_events(limit=100)) == 10
+    assert DurableQueue(str(queue_path)).pending() == 0
+
+
+def test_distributed_requeues_dead_letters(capsys, monkeypatch, tmp_path) -> None:
+    from autosiem.bus import DurableQueue
+
+    queue_path = tmp_path / "dead.db"
+    queue = DurableQueue(str(queue_path))
+    queue.dead_letter(queue.push("ingest", {"line": json.dumps({"user": "alice", "action": "login"}), "seq": 0}))
+    monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
+    payload = json.loads(_run_cli(capsys, monkeypatch, "distributed", "--requeue-dead-letters", "--rules", str(RULES_DIR), "--db", str(tmp_path / "d.db")))
+    assert payload["requeued"] == 1
+    assert payload["stats"]["queue_pending"] == 1 and payload["stats"]["queue_dead_letters"] == 0

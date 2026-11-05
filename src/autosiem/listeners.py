@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import select
 import socket
 import threading
 import time
@@ -194,6 +195,9 @@ def line_to_raw(line: str) -> dict[str, Any]:
 #: Longest a batch may wait to fill. Also the bound `--batch-wait` accepts.
 MAX_BATCH_WAIT_SECONDS = 3600.0
 
+#: Most lines the receive thread reads before handing a burst over.
+MAX_BURST_LINES = 256
+
 
 class BatchingHandler:
     """Collect parsed events and hand them to ``process`` in batches.
@@ -284,6 +288,93 @@ class BatchingHandler:
                     _LOG.exception("batch failure callback raised; %d line(s) not counted", len(batch))
 
 
+class QueueDrainer:
+    """Run ``drain`` on one thread when lines are queued, and retry when it fails.
+
+    ``drain`` runs once ``max_batch`` lines are waiting or ``max_wait`` seconds
+    after the first, the same timing as :class:`BatchingHandler`. A failure leaves
+    the lines in the durable queue, so it is retried with a growing delay even if
+    nothing new arrives: without that, one outage left lines pending until the
+    queue filled and every later datagram was refused.
+    """
+
+    def __init__(
+        self,
+        drain: Callable[[], Any],
+        max_batch: int = 200,
+        max_wait: float = 1.0,
+        retry_initial: float = 1.0,
+        retry_max: float = 30.0,
+    ) -> None:
+        self._drain = drain
+        self.max_batch = max(1, max_batch)
+        self.max_wait = 0.0 if not (max_wait > 0) else min(max_wait, MAX_BATCH_WAIT_SECONDS)
+        self.retry_initial = retry_initial
+        self.retry_max = retry_max
+        self._arrived = 0
+        self._first_at = 0.0
+        self._closed = False
+        self._cond = threading.Condition()
+        self._thread = threading.Thread(target=self._run, name="autosiem-drainer", daemon=True)
+        self._thread.start()
+
+    def notify(self, count: int = 1) -> None:
+        """Say that ``count`` more lines are in the queue."""
+        with self._cond:
+            first = self._arrived == 0
+            if first:
+                self._first_at = time.monotonic()
+            self._arrived += count
+            if first or self._arrived >= self.max_batch:
+                self._cond.notify()
+
+    def close(self) -> None:
+        """Try one last drain and stop. Whatever it leaves stays in the queue."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify_all()
+        self._thread.join()
+
+    def _wait_for_work(self, retry_at: float | None) -> None:
+        while not self._closed:
+            now = time.monotonic()
+            if retry_at is not None:
+                if now >= retry_at:
+                    return
+                self._cond.wait(retry_at - now)
+            elif self._arrived == 0:
+                self._cond.wait()
+            elif self._arrived >= self.max_batch or now >= self._first_at + self.max_wait:
+                return
+            else:
+                self._cond.wait(self._first_at + self.max_wait - now)
+
+    def _run(self) -> None:
+        delay = self.retry_initial
+        retry_at: float | None = None
+        while True:
+            with self._cond:
+                self._wait_for_work(retry_at)
+                closing = self._closed
+                self._arrived = 0
+            try:
+                self._drain()
+            except Exception as exc:
+                retry_at = time.monotonic() + delay
+                _LOG.warning(
+                    "could not process queued lines, retrying in %.0fs; they stay in the queue: %s: %s",
+                    delay,
+                    type(exc).__name__,
+                    _printable(str(exc)),
+                )
+                delay = min(delay * 2, self.retry_max)
+            else:
+                retry_at = None
+                delay = self.retry_initial
+            if closing:
+                return
+
+
 class SyslogServer:
     """Zero-dependency UDP listener: datagrams -> raw event dicts via a handler.
 
@@ -301,8 +392,13 @@ class SyslogServer:
         allowed_hosts: set[str] | list[str] | None = None,
         max_workers: int = 4,
         warn_interval: float = 10.0,
+        batch_handler: Callable[[list[dict[str, Any]]], None] | None = None,
     ) -> None:
         self.handler = handler
+        #: When set, the receive thread parses each burst of waiting datagrams and
+        #: hands it over before reading more, so a handler that makes lines durable
+        #: leaves nothing in memory. No worker pool is used.
+        self.batch_handler = batch_handler
         self.host = host
         self.port = port
         self.buffer_size = buffer_size
@@ -332,26 +428,34 @@ class SyslogServer:
         sock.bind((self.host, self.port))
         self._socket = sock
         self.port = sock.getsockname()[1]
-        self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="syslog-worker")
+        if self.batch_handler is None:
+            self._executor = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="syslog-worker")
         self._running.set()
-        self._thread = threading.Thread(target=self._serve, name="autosiem-listener", daemon=True)
+        serve = self._serve if self.batch_handler is None else self._serve_bursts
+        self._thread = threading.Thread(target=serve, name="autosiem-listener", daemon=True)
         self._thread.start()
+
+    def _parse_line(self, line: str, addr: tuple[str, int]) -> dict[str, Any] | None:
+        try:
+            raw = line_to_raw(line)
+        except Exception as exc:
+            self.record_failure("parse", addr, exc)
+            return None
+        # The sender is whoever delivered the line, often a relay: never the
+        # event's source IP, or every line behind one relay would share an entity
+        # and correlate, and containment would propose blocking the relay.
+        if isinstance(raw, dict) and addr:
+            raw["sender_ip"] = addr[0]
+        return raw
 
     def _process_line(self, line: str, addr: tuple[str, int]) -> None:
         # Both stages used to sit under a bare `except Exception: pass`: with
         # AUTOSIEM_QUEUE_PATH set every event failed and the listener still
         # looked healthy. Whether a failed event was stored depends on where the
         # handler failed, so the warning says "could not process", not "dropped".
-        try:
-            raw = line_to_raw(line)
-        except Exception as exc:
-            self.record_failure("parse", addr, exc)
+        raw = self._parse_line(line, addr)
+        if raw is None:
             return
-        # The sender is whoever delivered the line, often a relay: never the
-        # event's source IP, or every line behind one relay would share an entity
-        # and correlate, and containment would propose blocking the relay.
-        if isinstance(raw, dict) and addr:
-            raw["sender_ip"] = addr[0]
         try:
             self.handler(raw)
         except Exception as exc:
@@ -413,6 +517,34 @@ class SyslogServer:
                         # here rather than lose it uncounted.
                         pass
                 self._process_line(line, address)
+
+    def _parse_datagram(self, data: bytes, address: tuple[str, int]) -> list[dict[str, Any]]:
+        if self.allowed_hosts and address[0] not in self.allowed_hosts:
+            return []
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        parsed = (self._parse_line(line, address) for line in lines if line.strip())
+        return [raw for raw in parsed if raw is not None]
+
+    def _serve_bursts(self) -> None:
+        assert self._socket is not None and self.batch_handler is not None
+        while self._running.is_set():
+            try:
+                raws = self._parse_datagram(*self._socket.recvfrom(self.buffer_size))
+            except OSError:
+                break
+            # Take whatever else is already waiting. The socket can close under
+            # select or recvfrom during stop(); what was read is still handed over.
+            try:
+                while len(raws) < MAX_BURST_LINES and select.select([self._socket], [], [], 0)[0]:
+                    raws.extend(self._parse_datagram(*self._socket.recvfrom(self.buffer_size)))
+            except (OSError, ValueError):
+                pass
+            if not raws:
+                continue
+            try:
+                self.batch_handler(raws)
+            except Exception as exc:
+                self.record_failure("process", "burst", exc, count=len(raws))
 
     def stop(self) -> None:
         self._running.clear()

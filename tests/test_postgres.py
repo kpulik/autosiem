@@ -295,27 +295,43 @@ def test_pg_api_auth_approval_conflict_and_outbox_metrics(pg, pg_dsn, result, mo
 
 
 def test_pg_listener_persists_before_queue_ack(pg, pg_dsn, monkeypatch, tmp_path):
+    """The receive thread queues the line; the drainer saves it to PostgreSQL
+    and only then acknowledges it."""
+    import time
+
     from autosiem import cli
     from autosiem.bus import DurableQueue
     monkeypatch.setenv("AUTOSIEM_STORAGE", "postgres")
     monkeypatch.setenv("AUTOSIEM_POSTGRES_DSN", pg_dsn)
     monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(tmp_path / "queue.db"))
     monkeypatch.setenv("AUTOSIEM_BACKEND", "sqlite")
+    events_at_ack: list[int] = []
+    real_ack = DurableQueue.ack_many
+
+    def checked_ack(self, offsets):
+        events_at_ack.append(pg.counts()["events"])
+        real_ack(self, offsets)
+
+    monkeypatch.setattr(DurableQueue, "ack_many", checked_ack)
+
     class FakeServer:
-        def __init__(self, handler, **kwargs):
-            self.handler, self.port = handler, 5514
+        def __init__(self, handler, batch_handler=None, **kwargs):
+            self.handler, self.batch_handler, self.port = handler, batch_handler, 5514
             self.failures = 0
         def start(self):
-            self.handler({"event_id": "syslog-test", "timestamp": "2026-08-04T10:00:00Z", "action": "login_success"})
-            assert pg.counts()["events"] == 1
-            assert DurableQueue(str(tmp_path / "queue.db")).pending() == 0
+            assert self.batch_handler is not None, "a queued listener queues bursts in the receive thread"
+            self.batch_handler([{"event_id": "syslog-test", "timestamp": "2026-08-04T10:00:00Z", "action": "login_success"}])
+            deadline = time.monotonic() + 10
+            while DurableQueue(str(tmp_path / "queue.db")).pending() and time.monotonic() < deadline:
+                time.sleep(0.02)
             raise KeyboardInterrupt
         def stop(self):
             pass
     monkeypatch.setattr(cli, "SyslogServer", FakeServer)
-    # --batch-size 1: this test asserts the event is saved the moment the handler returns.
     monkeypatch.setattr(sys, "argv", ["autosiem", "listen", "--batch-size", "1", "--db", str(tmp_path / "not_created.db")])
     cli.main()
+    assert events_at_ack == [1], "acknowledged only once the event was in PostgreSQL"
+    assert DurableQueue(str(tmp_path / "queue.db")).pending() == 0
     assert pg.outbox_stats("sink")["pending"] == 1
 
 

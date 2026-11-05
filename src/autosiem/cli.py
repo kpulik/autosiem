@@ -34,7 +34,7 @@ from .schemas import DetectionRule
 from .sigma import export_rules
 from .sigma_sync import DEFAULT_RULESET, RULESETS, default_sigma_dir, load_synced_rules, merge_rules, sync_rules
 from .connectors import registry
-from .listeners import MAX_BATCH_WAIT_SECONDS, BatchingHandler, SyslogServer
+from .listeners import MAX_BATCH_WAIT_SECONDS, BatchingHandler, QueueDrainer, SyslogServer
 from .soar import SoarPlanner
 from .threat_intel import ThreatIntelMatcher, default_intel_state, load_intel_state, load_stix_bundle, save_intel_state
 from .update_job import run_update
@@ -286,6 +286,7 @@ def main() -> None:
     _add_db_arg(distributed)
     distributed.add_argument("--rules", default=str(DEFAULT_RULE_PATH), help="Rule file or directory")
     distributed.add_argument("--replay", action="store_true", help="Replay unacked messages from the durable queue")
+    distributed.add_argument("--requeue-dead-letters", action="store_true", help="Make lines set aside as unprocessable pending again")
 
     users = sub.add_parser("users", help="Manage RBAC users (multi-tenant roles) or describe roles")
     _add_db_arg(users)
@@ -569,6 +570,8 @@ def _run_distributed(args: argparse.Namespace) -> None:
             persist=store.save_pipeline_result if store else None,
             transactional_outbox=os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres",
         )
+        if args.requeue_dead_letters:
+            payload["requeued"] = pipeline.requeue_dead_letters()
         if args.replay:
             payload["replay"] = pipeline.replay_from_queue()
         # Report stats after any replay so the numbers reflect the final state.
@@ -1028,34 +1031,19 @@ def _run_listener(args: argparse.Namespace) -> None:
             persist=store.save_pipeline_result if store else None,
             transactional_outbox=os.environ.get("AUTOSIEM_STORAGE", "sqlite").lower() == "postgres",
         )
-        # Replay any unacked messages from previous crash
-        with _event_backend_errors(saved=store is not None, queued=True):
-            replay_result = dist_pipeline.replay_from_queue()
-        if replay_result.get("replayed", 0) > 0:
-            print(f"Replayed {replay_result['replayed']} events from queue")
+    queue_mode = dist_pipeline is not None and dist_pipeline.queue_enabled
+    if queue_mode and store is None and dist_pipeline.transactional_outbox:  # type: ignore[union-attr]
+        raise SystemExit("PostgreSQL durable ingest requires persistence; do not use --no-save")
 
     def process_batch(batch: list[dict[str, Any]]) -> None:
-        # One process_lines call per call-chunk: incidents are built from the
-        # findings of a single call, so only events in the same chunk share one.
-        # DistributedPipeline.run enqueues every line before processing any and
-        # loses the unqueued suffix if the queue fills part-way, so a batch is
-        # cut to the queue's free room; whatever cannot be queued is refused
-        # loudly (counted per line) instead of vanishing.
-        while batch:
-            room = dist_pipeline.queue_room() if dist_pipeline else None
-            if room is None or room >= len(batch):
-                chunk, batch = batch, []
-            elif room > 0:
-                chunk, batch = batch[:room], batch[room:]
-            else:
-                raise QueueFullError(f"queue full: {len(batch)} line(s) not accepted")
-            process_chunk(chunk)
-
-    def process_chunk(batch: list[dict[str, Any]]) -> None:
+        # One process_lines call per batch, so related events share an incident.
         lines = [json.dumps(raw) for raw in batch]
         result = dist_pipeline.run(lines) if dist_pipeline else pipeline.process_lines(lines)
         if store and dist_pipeline is None:
             store.save_pipeline_result(result)
+        report(result)
+
+    def report(result: PipelineResult) -> None:
         for event in result.events:
             finding_count = sum(1 for finding in result.findings if finding.event_id == event.event_id)
             print(
@@ -1065,24 +1053,57 @@ def _run_listener(args: argparse.Namespace) -> None:
 
     server: SyslogServer
 
-    def batch_failed(exc: Exception, count: int) -> None:
-        server.record_failure("process", "batch", exc, count=count)
+    # The pipeline is not thread-safe (its behavioral baseline, SOAR planner and
+    # baseline snapshot are shared mutable state; concurrent runs lost about 1
+    # event in 300), so either way one thread runs it, one batch at a time.
+    if queue_mode:
+        assert dist_pipeline is not None
+        queue = dist_pipeline
 
-    # SyslogServer calls its handler from a worker pool, but the pipeline is not
-    # thread-safe (its behavioral baseline, SOAR planner and baseline snapshot
-    # are shared mutable state; concurrent runs lost about 1 event in 300). The
-    # BatchingHandler parses in parallel and processes one batch at a time on a
-    # single thread.
-    batcher = BatchingHandler(
-        process_batch, batch_failed, max_batch=args.batch_size, max_wait=args.batch_wait
-    )
+        # The queue is the buffer. The receive thread commits each burst before
+        # reading more, so a crash loses nothing that was read, and the drainer
+        # keeps retrying through an outage.
+        def admit(raws: list[dict[str, Any]]) -> None:
+            lines = [json.dumps(raw) for raw in raws]
+            accepted = queue.admit(lines)
+            if accepted:
+                drainer.notify(accepted)
+            # A full queue refuses at once, counted. Waiting for room here would
+            # stop reading the socket, and the kernel would drop the datagrams
+            # arriving meanwhile with no count anywhere.
+            if accepted < len(lines):
+                refused = len(lines) - accepted
+                server.record_failure("queue", "burst", QueueFullError(f"queue full: {refused} line(s) refused"), count=refused)
+
+        def admit_one(raw: dict[str, Any]) -> None:
+            admit([raw])
+
+        drainer = QueueDrainer(
+            lambda: queue.drain_queue(args.batch_size, report),
+            max_batch=args.batch_size,
+            max_wait=args.batch_wait,
+        )
+        waiting = queue.stats["queue_pending"]
+        if waiting:
+            print(f"Processing {waiting} line(s) queued by an earlier run")
+            drainer.notify(waiting)
+        server = SyslogServer(admit_one, host=args.host, port=args.port, batch_handler=admit)
+        finish = drainer.close
+    else:
+        def batch_failed(exc: Exception, count: int) -> None:
+            server.record_failure("process", "batch", exc, count=count)
+
+        batcher = BatchingHandler(
+            process_batch, batch_failed, max_batch=args.batch_size, max_wait=args.batch_wait
+        )
+        server = SyslogServer(batcher, host=args.host, port=args.port)
+        finish = batcher.close
 
     def _terminate(_signum: int, _frame: Any) -> None:
         # docker stop and systemd send SIGTERM, whose default skips `finally`:
         # no orderly stop and no failure summary.
         raise KeyboardInterrupt
 
-    server = SyslogServer(batcher, host=args.host, port=args.port)
     previous_sigterm = signal.signal(signal.SIGTERM, _terminate)
     try:
         server.start()
@@ -1094,7 +1115,28 @@ def _run_listener(args: argparse.Namespace) -> None:
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         server.stop()
-        batcher.close()  # after stop(): every line already read is in the buffer
+        finish()  # after stop(): every line already read has been handed over
+        if queue_mode:
+            state = dist_pipeline.stats  # type: ignore[union-attr]
+            if state["queue_pending"]:
+                print(f"{state['queue_pending']} line(s) still queued; the next start processes them", file=sys.stderr)
+            if state["queue_dead_letters"]:
+                print(
+                    f"{state['queue_dead_letters']} line(s) set aside as unprocessable; "
+                    "`autosiem distributed --requeue-dead-letters` makes them pending again",
+                    file=sys.stderr,
+                )
+        if dist_pipeline is not None and dist_pipeline.backend_backlog:
+            print(
+                f"{dist_pipeline.backend_backlog} stored event(s) never reached the event backend; "
+                "the primary store has them",
+                file=sys.stderr,
+            )
+        if dist_pipeline is not None and dist_pipeline.backend_dropped:
+            print(
+                f"{dist_pipeline.backend_dropped} event(s) were dropped from the backend backlog while it was full",
+                file=sys.stderr,
+            )
         if server.failures:
             by_stage = ", ".join(f"{stage} {count}" for stage, count in sorted(server.failures_by_stage.items()) if count)
             print(
