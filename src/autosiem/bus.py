@@ -14,8 +14,9 @@ import logging
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .private_files import create_private
 
@@ -156,15 +157,32 @@ class DurableQueue:
             self._conn.execute("SELECT COUNT(*) FROM messages WHERE acked = 1").fetchone()[0]
         )
 
+    @contextmanager
+    def _write(self) -> Iterator[sqlite3.Connection]:
+        """One write transaction: committed on success, rolled back on any failure.
+
+        SQLite can refuse the commit itself (``database is locked`` while another
+        connection reads) and keep the transaction open. Left open, it holds the
+        queue's write lock against every other connection, and the next commit
+        here would quietly commit the failed write: lines reported refused could
+        be stored after all.
+        """
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+
     def _insert(self, topic: str, payload: Any) -> int:
         created_at = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            cursor = self._conn.execute(
+        with self._write() as conn:
+            cursor = conn.execute(
                 "INSERT INTO messages (topic, payload, created_at) VALUES (?, ?, ?)",
                 (topic, json.dumps(payload), created_at),
             )
-            self._conn.commit()
-            return int(cursor.lastrowid or 0)
+        return int(cursor.lastrowid or 0)
 
     def push(self, topic: str, payload: Any, max_pending: int | None = None) -> int:
         # Check and insert under one lock, or racing threads all pass the check.
@@ -183,11 +201,11 @@ class DurableQueue:
         rest were refused because the queue is full.
         """
         created_at = datetime.now(timezone.utc).isoformat()
-        with self._lock:
+        with self._write() as conn:
             room = len(payloads) if max_pending is None else max(0, max_pending - self.pending())
             offsets = [
                 int(
-                    self._conn.execute(
+                    conn.execute(
                         "INSERT INTO messages (topic, payload, created_at) VALUES (?, ?, ?)",
                         (topic, json.dumps(payload), created_at),
                     ).lastrowid
@@ -195,8 +213,7 @@ class DurableQueue:
                 )
                 for payload in payloads[:room]
             ]
-            self._conn.commit()
-            return offsets
+        return offsets
 
     @staticmethod
     def _decode(row: tuple) -> dict[str, Any]:
@@ -218,9 +235,9 @@ class DurableQueue:
         self.ack_many([offset])
 
     def ack_many(self, offsets: list[int]) -> None:
+        with self._write() as conn:
+            conn.executemany("UPDATE messages SET acked = 1 WHERE offset = ?", [(offset,) for offset in offsets])
         with self._lock:
-            self._conn.executemany("UPDATE messages SET acked = 1 WHERE offset = ?", [(offset,) for offset in offsets])
-            self._conn.commit()
             self._acks_since_compact += len(offsets)
             due = self._acks_since_compact >= COMPACT_AFTER_ACKS
             if due:
@@ -247,14 +264,13 @@ class DurableQueue:
         """
         removed = 0
         while True:
-            with self._lock:
+            with self._write() as conn:
                 ceiling = self.checkpoint() - 1
-                cursor = self._conn.execute(
+                cursor = conn.execute(
                     "DELETE FROM messages WHERE offset IN "
                     "(SELECT offset FROM messages WHERE acked = 1 AND offset <= ? LIMIT ?)",
                     (ceiling, COMPACT_CHUNK),
                 )
-                self._conn.commit()
             removed += int(cursor.rowcount)
             if cursor.rowcount < COMPACT_CHUNK:
                 return removed
@@ -276,9 +292,8 @@ class DurableQueue:
         It stops counting as pending, so it cannot block the queue, and
         ``compact`` leaves it alone.
         """
-        with self._lock:
-            self._conn.execute("UPDATE messages SET acked = ? WHERE offset = ?", (DEAD_LETTER, offset))
-            self._conn.commit()
+        with self._write() as conn:
+            conn.execute("UPDATE messages SET acked = ? WHERE offset = ?", (DEAD_LETTER, offset))
 
     def dead_letters(self) -> int:
         with self._lock:
@@ -287,10 +302,9 @@ class DurableQueue:
 
     def requeue_dead_letters(self) -> int:
         """Make set-aside messages pending again, for after the cause is fixed."""
-        with self._lock:
-            cursor = self._conn.execute("UPDATE messages SET acked = 0 WHERE acked = ?", (DEAD_LETTER,))
-            self._conn.commit()
-            return int(cursor.rowcount)
+        with self._write() as conn:
+            cursor = conn.execute("UPDATE messages SET acked = 0 WHERE acked = ?", (DEAD_LETTER,))
+        return int(cursor.rowcount)
 
     def pending(self) -> int:
         with self._lock:
@@ -340,9 +354,8 @@ class DurableQueue:
         without ``VACUUM``.
         """
         ceiling = -1 if max_acked is None else max_acked
-        with self._lock:
-            cursor = self._conn.execute(
+        with self._write() as conn:
+            cursor = conn.execute(
                 "DELETE FROM messages WHERE acked = 1 AND (? < 0 OR offset <= ?)", (ceiling, ceiling)
             )
-            self._conn.commit()
-            return int(cursor.rowcount)
+        return int(cursor.rowcount)
