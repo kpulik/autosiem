@@ -34,7 +34,7 @@ from .schemas import DetectionRule
 from .sigma import export_rules
 from .sigma_sync import DEFAULT_RULESET, RULESETS, default_sigma_dir, load_synced_rules, merge_rules, sync_rules
 from .connectors import registry
-from .listeners import MAX_BATCH_WAIT_SECONDS, BatchingHandler, QueueDrainer, SyslogServer
+from .listeners import MAX_BATCH_WAIT_SECONDS, BatchingHandler, QueueDrainer, SyslogServer, _printable
 from .soar import SoarPlanner
 from .threat_intel import ThreatIntelMatcher, default_intel_state, load_intel_state, load_stix_bundle, save_intel_state
 from .update_job import run_update
@@ -573,10 +573,34 @@ def _run_distributed(args: argparse.Namespace) -> None:
         if args.requeue_dead_letters:
             payload["requeued"] = pipeline.requeue_dead_letters()
         if args.replay:
-            payload["replay"] = pipeline.replay_from_queue()
+            try:
+                payload["replay"] = pipeline.replay_from_queue()
+            except Exception as exc:  # one line, never a traceback
+                pending = pipeline.stats.get("queue_pending", 0)
+                twice = pipeline.unacknowledged
+                caveat = (
+                    f"{twice} of them were saved before the queue could acknowledge them, "
+                    "so replaying again saves those a second time"
+                    if twice
+                    else "nothing pending was saved, so replaying again saves nothing twice"
+                )
+                raise SystemExit(
+                    f"replay stopped: {type(exc).__name__}: {_printable(str(exc))}; "
+                    f"{pending} line(s) still pending; {caveat}"
+                ) from None
         # Report stats after any replay so the numbers reflect the final state.
         payload["stats"] = pipeline.stats
     _print_json(payload)
+    undelivered = payload.get("replay", {}).get("backend_undelivered", 0)
+    if undelivered:
+        # The lines are saved and acknowledged, so a rerun cannot resend them:
+        # say so instead of exiting 0 over a missing copy.
+        reason = _printable(pipeline.backend_error or "unknown error")
+        raise SystemExit(
+            f"{reason}; {undelivered} replayed event(s) are in the primary store but never reached the event "
+            "backend; their queue messages are acknowledged, so replaying again saves nothing twice and "
+            "does not resend them"
+        )
 
 
 def _run_users(args: argparse.Namespace) -> None:

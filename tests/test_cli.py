@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -343,11 +344,59 @@ def _queue_with_one_pending_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_distributed_replay_reports_a_wedged_backend_in_one_line(capsys, monkeypatch, tmp_path, wedged_backend) -> None:
-    _queue_with_one_pending_line(tmp_path, monkeypatch)
+    """A backend failure after the save used to leave the lines pending, so the
+    next replay saved their events and findings a second time."""
+    from autosiem.bus import DurableQueue
+
+    queue_path = _queue_with_one_pending_line(tmp_path, monkeypatch)
+    db = tmp_path / "r.db"
     with pytest.raises(SystemExit) as excinfo:
-        _run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(tmp_path / "r.db"))
+        _run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(db))
     message = _one_line_backend_failure(excinfo)
-    assert "stay pending" in message
+    assert "1 replayed event(s) are in the primary store" in message and "saves nothing twice" in message
+    assert DurableQueue(str(queue_path)).pending() == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["replay"]["replayed"] == 1 and payload["replay"]["backend_undelivered"] == 1
+    rerun = json.loads(_run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(db)))
+    assert rerun["replay"]["replayed"] == 0, "nothing is pending, so nothing is saved twice"
+    assert len(open_storage(db).list_events(limit=10)) == 1
+
+
+def test_distributed_replay_is_not_capped_at_a_thousand_lines(capsys, monkeypatch, tmp_path) -> None:
+    from autosiem.bus import DurableQueue
+
+    queue_path = tmp_path / "big.db"
+    queue = DurableQueue(str(queue_path))
+    queue.push_many("ingest", [{"line": json.dumps({"user": f"u{i % 7}", "action": "login"}), "seq": i} for i in range(2500)])
+    monkeypatch.setenv("AUTOSIEM_QUEUE_PATH", str(queue_path))
+    db = tmp_path / "big-store.db"
+    payload = json.loads(_run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(db)))
+    assert payload["replay"]["replayed"] == 2500 and payload["stats"]["queue_pending"] == 0
+    assert len(open_storage(db).list_events(limit=5000)) == 2500
+
+
+def test_distributed_replay_stops_in_one_line_and_saves_nothing_twice(capsys, monkeypatch, tmp_path) -> None:
+    from autosiem.bus import DurableQueue
+    from autosiem.storage import AutoSIEMStorage
+
+    queue_path = _queue_with_one_pending_line(tmp_path, monkeypatch)
+    real_save = AutoSIEMStorage.save_pipeline_result
+
+    def locked(self, result, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked\nforged log line")
+
+    monkeypatch.setattr(AutoSIEMStorage, "save_pipeline_result", locked)
+    db = tmp_path / "stopped.db"
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(db))
+    message = str(excinfo.value)
+    assert message.startswith("replay stopped: OperationalError: database is locked")
+    assert "\n" not in message and "1 line(s) still pending; nothing pending was saved" in message
+    assert DurableQueue(str(queue_path)).pending() == 1
+    monkeypatch.setattr(AutoSIEMStorage, "save_pipeline_result", real_save)
+    payload = json.loads(_run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(db)))
+    assert payload["replay"]["replayed"] == 1
+    assert len(open_storage(db).list_events(limit=10)) == 1
 
 
 def test_a_wedged_backend_does_not_stop_the_listener(capsys, monkeypatch, tmp_path, wedged_backend, caplog) -> None:
@@ -718,3 +767,17 @@ def test_distributed_requeues_dead_letters(capsys, monkeypatch, tmp_path) -> Non
     payload = json.loads(_run_cli(capsys, monkeypatch, "distributed", "--requeue-dead-letters", "--rules", str(RULES_DIR), "--db", str(tmp_path / "d.db")))
     assert payload["requeued"] == 1
     assert payload["stats"]["queue_pending"] == 1 and payload["stats"]["queue_dead_letters"] == 0
+
+
+def test_distributed_replay_warns_when_a_saved_line_could_not_be_acknowledged(capsys, monkeypatch, tmp_path) -> None:
+    from autosiem.bus import DurableQueue
+
+    _queue_with_one_pending_line(tmp_path, monkeypatch)
+
+    def failing_ack(self, offsets):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(DurableQueue, "ack_many", failing_ack)
+    with pytest.raises(SystemExit) as excinfo:
+        _run_cli(capsys, monkeypatch, "distributed", "--replay", "--rules", str(RULES_DIR), "--db", str(tmp_path / "ack.db"))
+    assert "1 of them were saved before the queue could acknowledge them, so replaying again saves those a second time" in str(excinfo.value)
