@@ -471,7 +471,15 @@ def main() -> None:
             "matrix_technique_percent": report.coverage.get("matrix", {}).get("technique_percent"),
             "intel_refreshed": report.intel_refreshed,
             "messages": report.messages,
+            "failures": report.failures,
         })
+        if report.failures:
+            # The cycle finished on what it had; the exit status is what a cron
+            # job or systemd timer can see.
+            raise SystemExit(
+                f"update finished, but {len(report.failures)} requested refresh(es) failed: "
+                + "; ".join(_printable(failure) for failure in report.failures)
+            )
     elif args.command == "sigma-sync":
         dest = args.dest or default_sigma_dir(args.db)
         report = sync_rules(dest, ruleset=args.ruleset, limit=args.limit)

@@ -197,6 +197,55 @@ Collectors then send to `https://siem.example.com/api/ingest`. The syslog/CEF
 UDP listener has no TLS either; keep it on a trusted segment and use its
 source-IP allowlist.
 
+### Keeping rules, intel and ATT&CK current
+
+`cli update` runs one cycle: reload local rules, recompute coverage, and
+refresh only what you ask for (`--intel-url`/`--intel-path`, `--refresh-attack`,
+`--refresh-kev`). Nothing inside AutoSIEM runs it on a timer, so schedule it.
+It prints one JSON document and **exits 1 with one line on stderr when a
+requested refresh failed**, so the scheduler records the failure instead of a
+broken feed going unnoticed; the rest of the cycle still runs. ATT&CK is only
+downloaded when MITRE publishes a newer version, so a daily run is cheap.
+
+cron, daily at 03:15 (cron mails the stderr line to the job's owner):
+
+```cron
+15 3 * * * cd /opt/autosiem && PYTHONPATH=src python3 -m autosiem.cli update --refresh-attack --refresh-kev --db data/autosiem.db > /var/log/autosiem-update.json
+```
+
+systemd, `/etc/systemd/system/autosiem-update.service` and `.timer`:
+
+```ini
+[Unit]
+Description=AutoSIEM rule, intel and ATT&CK update
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/autosiem
+Environment=PYTHONPATH=src
+ExecStart=/usr/bin/python3 -m autosiem.cli update --refresh-attack --refresh-kev --db data/autosiem.db
+```
+
+```ini
+[Unit]
+Description=Run the AutoSIEM update daily
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+RandomizedDelaySec=15m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl enable --now autosiem-update.timer`. A failed
+refresh shows as a failed unit in `systemctl --failed`, with the reason in
+`journalctl -u autosiem-update`. `cli sigma-sync` can be scheduled the same
+way, weekly. The units above were written against the systemd documentation
+and not run here (this project is developed on macOS); check them with
+`systemd-analyze verify` before relying on them.
+
 ### 4. Source-health view
 
 ```bash
