@@ -151,3 +151,72 @@ def test_compacting_a_queue_in_use_fails_in_one_line(capsys, monkeypatch, tmp_pa
     assert message.startswith("could not compact the queue: OperationalError: database is locked")
     assert "\n" not in message and "Traceback" not in message
     assert time.monotonic() - started < 30
+
+
+# --- a refused commit must not leave the transaction open ----------------------
+
+
+def _reader_holding_a_read_lock(path) -> sqlite3.Connection:
+    reader = sqlite3.connect(str(path), isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT COUNT(*) FROM messages").fetchone()
+    return reader
+
+
+def _another_writer_can_write(path) -> bool:
+    other = sqlite3.connect(str(path), timeout=0.2)
+    try:
+        other.execute("INSERT INTO messages (topic, payload, created_at) VALUES ('ingest', '{}', 'x')")
+        other.commit()
+        return True
+    except sqlite3.OperationalError:
+        return False
+    finally:
+        other.close()
+
+
+def test_a_compaction_refused_at_commit_does_not_keep_the_queue_locked(tmp_path, small, caplog) -> None:
+    """Found by Codex review on #36: the failed DELETE stayed open and held the
+    write lock against every other producer, even after the reader left."""
+    path = tmp_path / "q.db"
+    queue, offsets = _filled(path, 12)
+    queue.ack_many(offsets[:9])
+    queue._conn.execute("PRAGMA busy_timeout = 100")
+    reader = _reader_holding_a_read_lock(path)
+    with caplog.at_level("WARNING", logger="autosiem.bus"):
+        queue._acks_since_compact = 10
+        queue._compact_quietly()
+    assert "could not compact the durable queue" in caplog.text
+    assert not queue._conn.in_transaction
+    reader.execute("COMMIT")
+    reader.close()
+    assert _another_writer_can_write(path)
+
+
+def test_a_push_refused_at_commit_is_not_stored_by_a_later_one(tmp_path) -> None:
+    """Left open, the failed insert was committed by the next push: lines the
+    listener counted as refused were stored after all."""
+    path = tmp_path / "q.db"
+    queue = DurableQueue(str(path))
+    queue._conn.execute("PRAGMA busy_timeout = 100")
+    reader = _reader_holding_a_read_lock(path)
+    with pytest.raises(sqlite3.OperationalError):
+        queue.push_many("ingest", [{"line": "refused"}])
+    reader.execute("COMMIT")
+    reader.close()
+    queue.push("ingest", {"line": "accepted"})
+    assert [m["payload"]["line"] for m in queue.pull(10)] == ["accepted"]
+
+
+def test_an_ack_refused_at_commit_can_be_retried(tmp_path) -> None:
+    path = tmp_path / "q.db"
+    queue, offsets = _filled(path, 3)
+    queue._conn.execute("PRAGMA busy_timeout = 100")
+    reader = _reader_holding_a_read_lock(path)
+    with pytest.raises(sqlite3.OperationalError):
+        queue.ack_many(offsets)
+    assert not queue._conn.in_transaction and queue.pending() == 3
+    reader.execute("COMMIT")
+    reader.close()
+    queue.ack_many(offsets)
+    assert queue.pending() == 0
