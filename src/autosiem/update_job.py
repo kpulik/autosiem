@@ -57,6 +57,10 @@ class UpdateReport:
     kev_version: str = ""
     kev_refreshed: bool = False
     messages: list[str] = field(default_factory=list)
+    #: Each requested refresh that failed, as "<feed>: <reason>". The cycle
+    #: still finishes on what it has; the CLI turns these into a failing exit
+    #: status, or a feed scheduled from cron would fail silently for ever.
+    failures: list[str] = field(default_factory=list)
 
 
 class UpdateJob:
@@ -149,6 +153,7 @@ class UpdateJob:
             except Exception as exc:  # a flaky feed must not fail the whole cycle
                 report.attack_refreshed = False
                 report.messages.append(f"attack refresh failed: {exc}")
+                report.failures.append(f"attack: {exc}")
 
         try:
             return load_matrix_file(dest)
@@ -174,6 +179,7 @@ class UpdateJob:
         except Exception as exc:  # a flaky feed must not fail the whole cycle
             report.kev_refreshed = False
             report.messages.append(f"kev refresh failed: {exc}")
+            report.failures.append(f"kev: {exc}")
 
     def _load_indicators(self, report: UpdateReport) -> list[Any]:
         """Fetch indicators from intel_url or intel_path; report failures."""
@@ -188,6 +194,7 @@ class UpdateJob:
             except Exception as exc:  # network/json failures must not kill the job
                 report.intel_refreshed = False
                 report.messages.append(f"intel refresh failed: {exc}")
+                report.failures.append(f"intel: {exc}")
                 return []
         if self.intel_path is not None:
             try:
@@ -195,6 +202,7 @@ class UpdateJob:
             except Exception as exc:
                 report.intel_refreshed = False
                 report.messages.append(f"intel refresh failed: {exc}")
+                report.failures.append(f"intel: {exc}")
                 return []
         return []
 
