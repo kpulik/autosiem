@@ -142,6 +142,8 @@ class DistributedPipeline:
         self._backend_retry_at = 0.0
         #: Events whose backend copy was given up on, oldest first, past the bound.
         self.backend_dropped = 0
+        #: The last event-backend failure, for reports; None once delivery works.
+        self.backend_error: str | None = None
 
         if config.queue_enabled and config.queue_path:
             self._queue = DurableQueue(config.queue_path)
@@ -195,6 +197,11 @@ class DistributedPipeline:
         # and archiving it on each attempt would journal it more than once.
         self._archive_lines(lines[:accepted])
         return accepted
+
+    @property
+    def unacknowledged(self) -> int:
+        """Lines saved whose acknowledgement failed: a new process would save them again."""
+        return len(self._unacked)
 
     @property
     def backend_backlog(self) -> int:
@@ -378,6 +385,7 @@ class DistributedPipeline:
         try:
             self._backend.store_events(self._backend_backlog)
         except BackendError as exc:
+            self.backend_error = str(exc)
             self._backend_retry_at = time.monotonic() + BACKEND_RETRY_SECONDS
             _LOG.warning(
                 "event backend unavailable (%s); holding %d event(s), the primary store has them",
@@ -386,6 +394,7 @@ class DistributedPipeline:
             )
         else:
             self._backend_backlog = []
+            self.backend_error = None
 
     def process_lines(self, lines: list[str]) -> dict[str, Any]:
         """Run the pipeline and return count summary. See :meth:`run`."""
@@ -491,45 +500,30 @@ class DistributedPipeline:
 
         return AutoSIEMPipeline(self.rules).process_lines(lines)
 
-    def replay_from_queue(self) -> dict[str, Any]:
-        """Replay unacked messages from the durable queue.
+    def replay_from_queue(self, batch_size: int = 200) -> dict[str, Any]:
+        """Process everything pending in the durable queue, for ``distributed --replay``.
 
-        Called on startup to recover from crashes.
+        This is :meth:`drain_queue` with totals: it used to replay at most 1000
+        lines per run, and a backend failure after the save left the lines
+        pending, so the next run saved their events and findings again. Now
+        every line is acknowledged once saved and an unreachable backend only
+        costs its copy, reported as ``backend_undelivered``. A failure that
+        stops the replay raises; whatever was settled before it stays settled.
         """
+        totals = {"events": 0, "findings": 0, "incidents": 0, "replayed": 0, "set_aside": 0}
         if self._queue is None:
-            return {"events": 0, "findings": 0, "incidents": 0, "replayed": 0}
+            return totals | {"backend_undelivered": 0}
 
-        pending = self._queue.pull(limit=1000)
-        # Only "ingest" messages carry raw lines. The ArchiveWriter pushes
-        # markers whose payload is a bare sequence int, and calling .get() on
-        # those raised AttributeError and aborted the whole replay.
-        ingest = [
-            msg for msg in pending
-            if msg.get("topic") == "ingest" and isinstance(msg.get("payload"), dict)
-        ]
-        lines = [str(msg["payload"]["line"]) for msg in ingest if msg["payload"].get("line")]
-        if not lines:
-            # Still ack any markers so they do not accumulate forever.
-            for msg in pending:
-                self._queue.ack(msg["offset"])
-            return {"events": 0, "findings": 0, "incidents": 0, "replayed": 0}
+        def tally(result: Any) -> None:
+            totals["events"] += len(result.events)
+            totals["findings"] += len(result.findings)
+            totals["incidents"] += len(result.incidents)
 
-        result = self._process(lines)
-
-        self._persist(result)
-        if self._backend and self.config.alternate_backend:
-            self._backend.store_events(result.events)
-
-        # Ack all replayed messages
-        for msg in pending:
-            self._queue.ack(msg["offset"])
-
-        return {
-            "events": len(result.events),
-            "findings": len(result.findings),
-            "incidents": len(result.incidents),
-            "replayed": len(lines),
-        }
+        set_aside_before = self._queue.dead_letters()
+        totals["replayed"] = self.drain_queue(batch_size, on_result=tally)
+        totals["set_aside"] = self._queue.dead_letters() - set_aside_before
+        totals["backend_undelivered"] = self.backend_backlog + self.backend_dropped
+        return totals
 
     @property
     def stats(self) -> dict[str, Any]:
