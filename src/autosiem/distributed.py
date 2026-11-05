@@ -12,14 +12,39 @@ the pipeline runs in the default single-threaded SQLite mode.
 
 from __future__ import annotations
 
+import copy
+import logging
 import os
+import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
 from .archive import ArchiveWriter, JournalFile
-from .backends import ClickHouseBackend, EventBackend, OpenSearchBackend, SqliteBackend, make_backend
+from .backends import BackendError, ClickHouseBackend, EventBackend, OpenSearchBackend, SqliteBackend, make_backend
 from .bus import DurableQueue, QueueFullError
 from .workers import ParserWorkerPool
+
+_LOG = logging.getLogger(__name__)
+
+#: How long the listener leaves a failed event backend alone. A silent cluster
+#: costs a 30 s timeout per call, which must not be paid on every batch.
+BACKEND_RETRY_SECONDS = 60.0
+
+#: Longest quiet time between warnings about lines being set aside.
+SET_ASIDE_WARNING_SECONDS = 10.0
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether the whole batch should be retried later, unchanged: an outage.
+
+    Anything else is bisected to find the lines that fail (see
+    ``DistributedPipeline._settle``). psycopg is optional, so its errors are
+    matched by name.
+    """
+    if isinstance(exc, (OSError, MemoryError)):
+        return True
+    return any(cls.__name__ in ("OperationalError", "InterfaceError") for cls in type(exc).__mro__)
 
 
 @dataclass
@@ -28,7 +53,7 @@ class DistributedConfig:
 
     # Queue settings
     queue_path: str | None = None
-    queue_max_pending: int = 10000
+    queue_max_pending: int = 100_000
 
     # Archive settings
     archive_path: str | None = None
@@ -63,7 +88,7 @@ def config_from_env() -> DistributedConfig:
     """Read distributed pipeline configuration from environment variables."""
     return DistributedConfig(
         queue_path=os.environ.get("AUTOSIEM_QUEUE_PATH"),
-        queue_max_pending=int(os.environ.get("AUTOSIEM_QUEUE_MAX_PENDING", "10000")),
+        queue_max_pending=int(os.environ.get("AUTOSIEM_QUEUE_MAX_PENDING", "100000")),
         archive_path=os.environ.get("AUTOSIEM_ARCHIVE_PATH"),
         workers=int(os.environ.get("AUTOSIEM_WORKERS", "4")),
         backend_type=os.environ.get("AUTOSIEM_BACKEND", "sqlite").lower(),
@@ -106,6 +131,17 @@ class DistributedPipeline:
         self._archive: ArchiveWriter | None = None
         self._workers: ParserWorkerPool | None = None
         self._backend: EventBackend | None = None
+        #: A processed batch awaiting a successful save: its result, its queue
+        #: messages, and the behavioral baseline from before it was processed.
+        self._held: tuple[Any, list[dict[str, Any]], dict[str, Any] | None] | None = None
+        #: Offsets of a saved batch whose acknowledgement failed. Retrying only
+        #: acknowledges them: processing them again would save them twice.
+        self._unacked: list[int] = []
+        self._last_set_aside_warning = float("-inf")
+        self._backend_backlog: list[Any] = []
+        self._backend_retry_at = 0.0
+        #: Events whose backend copy was given up on, oldest first, past the bound.
+        self.backend_dropped = 0
 
         if config.queue_enabled and config.queue_path:
             self._queue = DurableQueue(config.queue_path)
@@ -141,15 +177,215 @@ class DistributedPipeline:
             return OpenSearchBackend(**kwargs)
         return None
 
-    def queue_room(self) -> int | None:
-        """How many more lines the durable queue will accept, or None if unbounded.
+    @property
+    def queue_enabled(self) -> bool:
+        return self._queue is not None
 
-        ``run`` enqueues every line of a call before processing any, so a caller
-        with more lines than this must split them or it loses the suffix.
+    def admit(self, lines: list[str]) -> int:
+        """Make lines durable without processing them; returns how many fit.
+
+        The lines beyond that were refused because the queue is full.
+        :meth:`drain_queue` processes what was admitted.
         """
         if self._queue is None:
-            return None
-        return max(0, self.config.queue_max_pending - self._queue.pending())
+            raise ValueError("admit requires a durable queue")
+        payloads = [{"line": line, "seq": index} for index, line in enumerate(lines)]
+        accepted = len(self._queue.push_many("ingest", payloads, max_pending=self.config.queue_max_pending))
+        # Only what was accepted is archived: a caller retries the refused rest,
+        # and archiving it on each attempt would journal it more than once.
+        self._archive_lines(lines[:accepted])
+        return accepted
+
+    @property
+    def backend_backlog(self) -> int:
+        """Events processed and stored but not yet delivered to the event backend."""
+        return len(self._backend_backlog)
+
+    def requeue_dead_letters(self) -> int:
+        return self._queue.requeue_dead_letters() if self._queue is not None else 0
+
+    def drain_queue(self, batch_size: int = 200, on_result: Callable[[Any], None] | None = None) -> int:
+        """Process pending lines until none are left; returns how many settled.
+
+        A transient failure raises and leaves everything pending, so a later
+        call resumes. A batch that was processed but could not be saved is held
+        and only its save is retried: processing it again would count its events
+        into the behavioral baseline a second time. A line that cannot be
+        processed at all is set aside (see :meth:`_settle_batch`), so it cannot block
+        the lines behind it until the queue fills.
+        """
+        if self._queue is None:
+            return 0
+        if self.transactional_outbox and self.persist is None:
+            raise ValueError("PostgreSQL durable ingest requires persistence; do not use --no-save")
+        self._flush_backend()
+        settled = 0
+        while True:
+            if self._unacked:
+                self._queue.ack_many(self._unacked)
+                self._unacked = []
+            if self._held is not None:
+                _result, held_batch, before = self._held
+                try:
+                    settled += self._save_held(on_result)
+                except Exception as exc:
+                    if _is_transient(exc) or self._unacked:
+                        raise
+                    # The save now fails for a reason retrying cannot cure, so
+                    # find the line responsible the same way as below.
+                    self._held = None
+                    self._restore_baseline(before)
+                    settled += self._settle_batch(held_batch, on_result)
+                continue
+            batch = self._queue.pull(limit=batch_size)
+            if not batch:
+                return settled
+            # Only ingest messages carry lines. Anything else (an archive marker
+            # from a queue written before the journal stopped pushing them) would
+            # otherwise stay pending for ever and count against the queue limit.
+            other = [message["offset"] for message in batch if message["topic"] != "ingest"]
+            if other:
+                self._queue.ack_many(other)
+            batch = [message for message in batch if message["topic"] == "ingest"]
+            if batch:
+                settled += self._settle_batch(batch, on_result)
+
+    def _settle_batch(self, batch: list[dict[str, Any]], on_result: Callable[[Any], None] | None) -> int:
+        """Settle a batch; set aside its failing lines only if the store took the rest.
+
+        A line is to blame only when lines beside it were saved. If none were,
+        the store itself is failing (corrupt, unmigrated, read-only after a
+        failover) and setting lines aside would empty the queue into dead
+        letters, so the batch is left pending and the error raised for a retry.
+        A batch holding nothing but failing lines therefore waits until a line
+        that works arrives with them.
+        """
+        suspects: list[tuple[int, Exception]] = []
+        settled = self._settle(batch, on_result, suspects)
+        if suspects and not settled:
+            raise suspects[-1][1]
+        for offset, exc in suspects:
+            self._set_aside(offset, exc)
+        return settled
+
+    def _settle(
+        self, batch: list[dict[str, Any]], on_result: Callable[[Any], None] | None, suspects: list[tuple[int, Exception]]
+    ) -> int:
+        """Process and save one batch, bisecting it around lines that fail."""
+        before = self._baseline_snapshot()
+        try:
+            lines = [str(message["payload"]["line"]) for message in batch]
+            try:
+                result = self._process(lines)
+            except Exception:
+                # Nothing is held, so a retry processes the batch again.
+                self._restore_baseline(before)
+                raise
+            self._held = (result, batch, before)
+            return self._save_held(on_result)
+        except Exception as exc:
+            # A processed batch stays held, so only its save is retried; a saved
+            # one is only acknowledged. Neither may be processed again.
+            if _is_transient(exc) or self._unacked:
+                raise
+            if self._held is not None:
+                self._held = None
+                self._restore_baseline(before)
+            if len(batch) == 1:
+                suspects.append((batch[0]["offset"], exc))
+                return 0
+            middle = len(batch) // 2
+            return self._settle(batch[:middle], on_result, suspects) + self._settle(batch[middle:], on_result, suspects)
+
+    # Two parts of the pipeline learn from every batch: the behavioral baseline
+    # and the suppression engine's repeat counter. A batch processed again, on a
+    # retry or in halves while a bad line is isolated, would be learned twice or
+    # more without these: inflated counts mute ``rare_action``, trip ``burst``,
+    # and auto-suppress real findings as repeats.
+
+    def _baseline_snapshot(self) -> dict[str, Any] | None:
+        snapshot: dict[str, Any] = {}
+        state = getattr(getattr(self.pipeline, "anomaly_detector", None), "state", None)
+        if state is not None:
+            snapshot["baseline"] = state.to_dict()
+        seen = getattr(getattr(self.pipeline, "suppression_engine", None), "_seen", None)
+        if seen is not None:
+            snapshot["seen"] = copy.deepcopy(seen)
+        return snapshot or None
+
+    def _restore_baseline(self, snapshot: dict[str, Any] | None) -> None:
+        if snapshot is None:
+            return
+        if "baseline" in snapshot:
+            from .anomaly import BaselineState
+
+            self.pipeline.anomaly_detector.state = BaselineState.from_dict(snapshot["baseline"])  # type: ignore[union-attr]
+        if "seen" in snapshot:
+            self.pipeline.suppression_engine._seen = copy.deepcopy(snapshot["seen"])  # type: ignore[union-attr]
+
+    def _save_held(self, on_result: Callable[[Any], None] | None) -> int:
+        assert self._queue is not None and self._held is not None
+        result, batch, _before = self._held
+        self._persist(result)
+        self._held = None
+        self._unacked = [message["offset"] for message in batch]
+        # Everything that needs the result happens before the ack, which is the
+        # one step after the save that can fail: a retry then only acknowledges.
+        self._send_to_backend(result.events)
+        if on_result is not None:
+            try:
+                on_result(result)
+            except Exception:  # reporting must never make a saved batch look failed
+                _LOG.exception("could not report a saved batch of %d line(s)", len(batch))
+        self._queue.ack_many(self._unacked)
+        self._unacked = []
+        return len(batch)
+
+    def _set_aside(self, offset: int, exc: Exception) -> None:
+        assert self._queue is not None
+        self._queue.dead_letter(offset)
+        # Any sender can craft such lines, so the warning is rate-limited, and it
+        # names only the error type because the text can quote the line.
+        now = time.monotonic()
+        if now - self._last_set_aside_warning >= SET_ASIDE_WARNING_SECONDS:
+            self._last_set_aside_warning = now
+            _LOG.warning(
+                "set aside a queued line that cannot be processed (%s); %d set aside in total. "
+                "Requeue with `autosiem distributed --requeue-dead-letters` once fixed",
+                type(exc).__name__,
+                self._queue.dead_letters(),
+            )
+
+    def _send_to_backend(self, events: list[Any]) -> None:
+        if self._backend is None or not self.config.alternate_backend:
+            return
+        self._backend_backlog.extend(events)
+        excess = len(self._backend_backlog) - self.config.queue_max_pending
+        if excess > 0:
+            del self._backend_backlog[:excess]
+            self.backend_dropped += excess
+        self._flush_backend()
+
+    def _flush_backend(self) -> None:
+        """Deliver the backend copy. An outage here never stops detection.
+
+        The primary store already has these events, so its queue messages are
+        acknowledged. Retrying the whole batch would save them again, and waiting
+        out a silent cluster on every batch would stall the primary store.
+        """
+        if self._backend is None or not self._backend_backlog or time.monotonic() < self._backend_retry_at:
+            return
+        try:
+            self._backend.store_events(self._backend_backlog)
+        except BackendError as exc:
+            self._backend_retry_at = time.monotonic() + BACKEND_RETRY_SECONDS
+            _LOG.warning(
+                "event backend unavailable (%s); holding %d event(s), the primary store has them",
+                type(exc).__name__,
+                len(self._backend_backlog),
+            )
+        else:
+            self._backend_backlog = []
 
     def process_lines(self, lines: list[str]) -> dict[str, Any]:
         """Run the pipeline and return count summary. See :meth:`run`."""
@@ -178,14 +414,7 @@ class DistributedPipeline:
             raise ValueError("PostgreSQL durable ingest requires persistence; do not use --no-save")
 
         # Archive raw events first (for durability)
-        if self._archive is not None:
-            import json as _json
-            for line in lines:
-                try:
-                    raw = _json.loads(line) if line.strip().startswith("{") else {"raw": line}
-                except Exception:
-                    raw = {"raw": line}
-                self._archive.write(raw)
+        self._archive_lines(lines)
 
         # Enqueue to durable queue (for backpressure). Offsets are remembered so
         # exactly these messages are acked after processing: the ArchiveWriter
@@ -230,6 +459,17 @@ class DistributedPipeline:
                 self._queue.ack(offset)
 
         return result
+
+    def _archive_lines(self, lines: list[str]) -> None:
+        if self._archive is None:
+            return
+        import json as _json
+        for line in lines:
+            try:
+                raw = _json.loads(line) if line.strip().startswith("{") else {"raw": line}
+            except Exception:
+                raw = {"raw": line}
+            self._archive.write(raw)
 
     def _persist(self, result: Any) -> None:
         if self.persist is not None:
@@ -296,6 +536,7 @@ class DistributedPipeline:
             stats["queue_pending"] = self._queue.pending()
             stats["queue_checkpoint"] = self._queue.checkpoint()
             stats["queue_total"] = len(self._queue)
+            stats["queue_dead_letters"] = self._queue.dead_letters()
 
         if self._archive is not None:
             stats["archive_sequence"] = self._archive.journal.sequence()

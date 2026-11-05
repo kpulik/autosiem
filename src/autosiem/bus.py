@@ -18,6 +18,10 @@ from typing import Any, Callable
 from .private_files import create_private
 
 
+#: ``messages.acked`` value of a message set aside by ``DurableQueue.dead_letter``.
+DEAD_LETTER = 2
+
+
 class QueueFullError(Exception):
     """Raised when a durable queue exceeds its configured ``max_pending``."""
 
@@ -131,6 +135,8 @@ class DurableQueue:
             )
             """
         )
+        # pending() runs on every push; without this it scans every acked row.
+        self._conn.execute("CREATE INDEX IF NOT EXISTS messages_pending ON messages(offset) WHERE acked = 0")
         self._conn.commit()
 
     def _insert(self, topic: str, payload: Any) -> int:
@@ -152,17 +158,42 @@ class DurableQueue:
                     raise QueueFullError(f"queue overflow: {pending} >= {max_pending} pending")
             return self._insert(topic, payload)
 
+    def push_many(self, topic: str, payloads: list[Any], max_pending: int | None = None) -> list[int]:
+        """Queue as many payloads as fit in one commit; returns their offsets.
+
+        One commit per burst is what lets the receive thread make datagrams
+        durable as fast as they arrive. Fewer offsets than payloads means the
+        rest were refused because the queue is full.
+        """
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            room = len(payloads) if max_pending is None else max(0, max_pending - self.pending())
+            offsets = [
+                int(
+                    self._conn.execute(
+                        "INSERT INTO messages (topic, payload, created_at) VALUES (?, ?, ?)",
+                        (topic, json.dumps(payload), created_at),
+                    ).lastrowid
+                    or 0
+                )
+                for payload in payloads[:room]
+            ]
+            self._conn.commit()
+            return offsets
+
     @staticmethod
     def _decode(row: tuple) -> dict[str, Any]:
         offset, topic, payload, _acked, _created_at = row
         return {"offset": offset, "topic": topic, "payload": json.loads(payload)}
 
-    def pull(self, limit: int = 100) -> list[dict]:
+    def pull(self, limit: int = 100, topic: str | None = None) -> list[dict]:
+        where = "acked = 0" if topic is None else "acked = 0 AND topic = ?"
+        params = (limit,) if topic is None else (topic, limit)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT offset, topic, payload, acked, created_at FROM messages "
-                "WHERE acked = 0 ORDER BY offset ASC LIMIT ?",
-                (limit,),
+                f"SELECT offset, topic, payload, acked, created_at FROM messages "
+                f"WHERE {where} ORDER BY offset ASC LIMIT ?",
+                params,
             ).fetchall()
         return [self._decode(row) for row in rows]
 
@@ -170,6 +201,33 @@ class DurableQueue:
         with self._lock:
             self._conn.execute("UPDATE messages SET acked = 1 WHERE offset = ?", (offset,))
             self._conn.commit()
+
+    def ack_many(self, offsets: list[int]) -> None:
+        with self._lock:
+            self._conn.executemany("UPDATE messages SET acked = 1 WHERE offset = ?", [(offset,) for offset in offsets])
+            self._conn.commit()
+
+    def dead_letter(self, offset: int) -> None:
+        """Set aside a message that cannot be processed, keeping it for inspection.
+
+        It stops counting as pending, so it cannot block the queue, and
+        ``compact`` leaves it alone.
+        """
+        with self._lock:
+            self._conn.execute("UPDATE messages SET acked = ? WHERE offset = ?", (DEAD_LETTER, offset))
+            self._conn.commit()
+
+    def dead_letters(self) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM messages WHERE acked = ?", (DEAD_LETTER,)).fetchone()
+        return int(row[0])
+
+    def requeue_dead_letters(self) -> int:
+        """Make set-aside messages pending again, for after the cause is fixed."""
+        with self._lock:
+            cursor = self._conn.execute("UPDATE messages SET acked = 0 WHERE acked = ?", (DEAD_LETTER,))
+            self._conn.commit()
+            return int(cursor.rowcount)
 
     def pending(self) -> int:
         with self._lock:
