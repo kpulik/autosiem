@@ -400,6 +400,7 @@ yet, so bring your own.
 - `docs/tutorial.md` — start here (20-minute beginner walkthrough)
 - `docs/architecture.md` — module map and how the pieces fit together
 - `docs/roadmap.md` — current status and the phased plan
+- `docs/engineering-history.md` — what was built, what broke, and how it was measured
 - `docs/deployment-and-collection.md` — how real deployments get data in
 - `docs/ai-soc-runtime.md` — the AI analyst runtime, LLM config, and safety model
 - `docs/system-one.md` — the typed decision layer: providers, thresholds, evaluation
