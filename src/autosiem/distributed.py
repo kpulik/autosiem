@@ -464,12 +464,16 @@ class DistributedPipeline:
         if self._archive is None:
             return
         import json as _json
+
+        records = []
         for line in lines:
             try:
                 raw = _json.loads(line) if line.strip().startswith("{") else {"raw": line}
             except Exception:
                 raw = {"raw": line}
-            self._archive.write(raw)
+            records.append(raw)
+        # One locked write per burst: the listener archives in its receive thread.
+        self._archive.write_many(records)
 
     def _persist(self, result: Any) -> None:
         if self.persist is not None:
