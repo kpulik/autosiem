@@ -8,7 +8,7 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, is_dataclass, replace
+from dataclasses import fields, is_dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -116,7 +116,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
         tenant = tenant_id or DEFAULT_TENANT
         with self.connect() as conn:
             for event in result.events:
-                doc = event.to_dict()
+                text = _json(event.to_dict())
                 self._insert(
                     conn, "events", 'event_id,timestamp,category,action,user,host,src_ip,severity,data,tenant_id',
                     (
@@ -128,11 +128,11 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                         event.host,
                         event.src_ip,
                         event.severity.name.lower(),
-                        _json(doc),
+                        text,
                         tenant,
                     ),
                 )
-                self._event_saved(conn, tenant, event.event_id, _json(doc))
+                self._event_saved(conn, tenant, event.event_id, text)
             for finding in result.findings:
                 doc = _to_jsonable(finding)
                 self._insert(
@@ -145,7 +145,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                         finding.timestamp.isoformat(),
                         finding.severity.name.lower(),
                         finding.risk_points,
-                        _json(doc),
+                        _dump(doc),
                         tenant,
                     ),
                 )
@@ -171,7 +171,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                             incident.risk_score,
                             "open",
                             incident.created_at.isoformat(),
-                            _json(doc),
+                            _dump(doc),
                             tenant,
                         ),
                     )
@@ -257,7 +257,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 incident.title,
                 incident.severity.name.lower(),
                 incident.risk_score,
-                _json(_to_jsonable(incident)),
+                _json(incident),
                 datetime.now(timezone.utc).isoformat(),
                 incident_id,
                 tenant,
@@ -384,7 +384,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                 investigation.decision.decision_type.value,
                 investigation.decision.confidence,
                 investigation.created_at.isoformat(),
-                _json(doc),
+                _dump(doc),
                 tenant,
             ),
         )
@@ -403,7 +403,7 @@ class RelationalStorage(ControlPlaneStore, EventQueryStore, BaselineStore):
                     int(proposal.approval_required),
                     int(proposal.executable_now),
                     "pending",
-                    _json(_to_jsonable(proposal)),
+                    _json(proposal),
                     tenant,
                 ),
             )
@@ -1286,12 +1286,26 @@ def _event_summary(event: dict[str, Any]) -> str:
     return f"{action} user={user} host={host} src_ip={src_ip}"
 
 
+_PLAIN = (str, int, float, bool, type(None))
+
+
 def _to_jsonable(value: Any) -> Any:
+    """Plain JSON data for ``value``, in one pass.
+
+    Saving a pipeline result spent most of its time here: ``asdict`` deep-copied
+    every dataclass and the copy was walked again. Fields are now read directly.
+    The output is what the asdict version produced, byte for byte once dumped
+    (``test_json_encoding.py``); tuples become lists, as json.dumps wrote them.
+    The plain-type check is exact, so ``Severity`` (an IntEnum) still encodes
+    by name.
+    """
+    if type(value) in _PLAIN:
+        return value
     if is_dataclass(value) and not isinstance(value, type):
-        return {key: _to_jsonable(item) for key, item in asdict(value).items()}
+        return {f.name: _to_jsonable(getattr(value, f.name)) for f in fields(value)}
     if isinstance(value, dict):
         return {str(key): _to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_to_jsonable(item) for item in value]
     if isinstance(value, datetime):
         return value.isoformat()
@@ -1302,3 +1316,8 @@ def _to_jsonable(value: Any) -> Any:
 
 def _json(value: Any) -> str:
     return json.dumps(_to_jsonable(value), sort_keys=True)
+
+
+def _dump(doc: Any) -> str:
+    """JSON text for a document that ``_to_jsonable`` already produced."""
+    return json.dumps(doc, sort_keys=True)
