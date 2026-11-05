@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -287,6 +288,10 @@ def main() -> None:
     distributed.add_argument("--rules", default=str(DEFAULT_RULE_PATH), help="Rule file or directory")
     distributed.add_argument("--replay", action="store_true", help="Replay unacked messages from the durable queue")
     distributed.add_argument("--requeue-dead-letters", action="store_true", help="Make lines set aside as unprocessable pending again")
+    distributed.add_argument(
+        "--compact", action="store_true",
+        help="Delete acknowledged queue rows and shrink the file (VACUUM); stop the listener first",
+    )
 
     users = sub.add_parser("users", help="Manage RBAC users (multi-tenant roles) or describe roles")
     _add_db_arg(users)
@@ -553,6 +558,9 @@ def _run_distributed(args: argparse.Namespace) -> None:
             "and the behavioral baseline are applied.",
         ],
     }
+    for flag, wanted in (("--compact", args.compact), ("--requeue-dead-letters", args.requeue_dead_letters), ("--replay", args.replay)):
+        if wanted and not config.queue_enabled:
+            raise SystemExit(f"{flag} needs a durable queue; set AUTOSIEM_QUEUE_PATH")
     if any(enabled.values()):
         rules = _rules_with_state(args.rules, _rule_state_from_db(args.db))
         store = open_storage(args.db) if args.replay else None
@@ -572,6 +580,14 @@ def _run_distributed(args: argparse.Namespace) -> None:
         )
         if args.requeue_dead_letters:
             payload["requeued"] = pipeline.requeue_dead_letters()
+        if args.compact:
+            try:
+                payload["compacted"] = pipeline.compact_queue()
+            except sqlite3.Error as exc:  # one line, never a traceback
+                raise SystemExit(
+                    f"could not compact the queue: {type(exc).__name__}: {_printable(str(exc))}; "
+                    "nothing was lost. Stop the listener (or anything else using the queue) and run it again"
+                ) from None
         if args.replay:
             try:
                 payload["replay"] = pipeline.replay_from_queue()

@@ -208,6 +208,14 @@ class DistributedPipeline:
         """Events processed and stored but not yet delivered to the event backend."""
         return len(self._backend_backlog)
 
+    def compact_queue(self) -> dict[str, int]:
+        """Delete acknowledged queue rows and shrink the file; see DurableQueue.vacuum."""
+        if self._queue is None:
+            return {"removed": 0, "bytes_before": 0, "bytes_after": 0}
+        removed = self._queue.compact_acked()
+        before, after = self._queue.vacuum()
+        return {"removed": removed, "bytes_before": before, "bytes_after": after}
+
     def requeue_dead_letters(self) -> int:
         return self._queue.requeue_dead_letters() if self._queue is not None else 0
 
